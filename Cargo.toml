@@ -6,6 +6,7 @@ license = "GPL-3.0-or-later"
 description = "QO-100 DATV yayınları için SDR alıcı ve DVB-S2 çözücü"
 
 [dependencies]
+eframe = "0.35.0"
 num-complex = "0.4"
 rustfft = "6"
 soapysdr = "0.5.1"

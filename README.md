@@ -8,6 +8,13 @@ QODA, QO-100 ve DATV'den esinlenmiştir.
 
 Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR cihazlarını SoapySDR üzerinden açıp spektrumu göstermek.
 
+## Kullanım
+
+1. Windows'ta [PothosSDR](https://downloads.myriadrf.org/builds/PothosSDR/) kurun ve `bin` klasörünü PATH'e ekleyin (SoapySDR ve RTL-SDR sürücüsü bununla gelir).
+2. `cargo run --release` ile QODA'yı başlatın.
+3. Cihazı seçip **Başlat**'a basın. LNB LO ve merkez RF frekansını girin; IF otomatik hesaplanır.
+4. Spektrumda bir yayına **tıklayın** (seçer) ya da **çift tıklayın** (seçer ve alıcıyı oraya ortalar). Sembol hızı ve roll-off'a göre kaplanan bant mavi olarak gösterilir.
+
 ## Planlanan özellikler
 
 - Yaygın SDR cihazlarını tanıma (SoapySDR)
