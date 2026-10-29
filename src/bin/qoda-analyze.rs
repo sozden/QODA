@@ -25,11 +25,13 @@ struct Args {
     seconds: Option<f64>,
     symbol_rate: Option<f64>,
     rolloff: Option<f64>,
+    /// Kaydı akış alıcısından parça parça geçir (canlı çözümü sınamak için).
+    stream: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, rolloff: None };
+    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, rolloff: None, stream: false };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("{flag} için değer eksik"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
@@ -38,6 +40,7 @@ fn parse_args() -> Result<Args, String> {
             "--seconds" => args.seconds = Some(num(it.next(), &a)?),
             "--rs" => args.symbol_rate = Some(num(it.next(), &a)? * 1e3),
             "--rolloff" => args.rolloff = Some(num(it.next(), &a)?),
+            "--stream" => args.stream = true,
             _ if a.starts_with("--") => return Err(format!("bilinmeyen seçenek: {a}")),
             _ => args.path = PathBuf::from(a),
         }
@@ -88,6 +91,10 @@ fn run() -> Result<(), String> {
         rs / 1e3,
         found.snr_db
     );
+
+    if args.stream {
+        return run_stream(&x, fs, found.center_offset_hz, rs, rolloff, &args.path.with_extension("stream.ts"));
+    }
 
     // 2. Merkeze indir, RRC eşleştirilmiş filtre, zamanlama kurtarma.
     filters::mix_down(&mut x, found.center_offset_hz, fs);
@@ -184,7 +191,7 @@ fn run() -> Result<(), String> {
     decode_frames(&llrs, &args.path.with_extension("ts"))
 }
 
-/// Pilotsuz QPSK çerçevelerinin gövdelerini çözüp gövde boyunca SNR'ı raporlar.
+/// QPSK çerçevelerinin gövdelerini çözüp gövde boyunca SNR'ı raporlar.
 fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(plheader::Pls, Vec<f32>)> {
     let mut scrambling: Vec<u8> = Vec::new();
     let mut snrs = Vec::new();
@@ -198,7 +205,7 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         let Some(len) = h.pls.frame_len() else { continue };
         let body_len = len - plheader::HEADER_LEN;
         let start = h.position + plheader::HEADER_LEN;
-        if !qpsk || h.pls.pilots || start + body_len > symbols.len() {
+        if !qpsk || start + body_len > symbols.len() {
             continue;
         }
         if scrambling.len() < body_len {
@@ -207,7 +214,7 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         let carrier = plframe::body_start(h.phase, common_w);
         let body = &symbols[start..start + body_len];
         // Gövdeyi dörde bölüp her parçadaki SNR'a bak: takip kaçarsa sonlara doğru düşer.
-        let out = plframe::demap_qpsk(body, &scrambling[..body_len], carrier, CARRIER_BANDWIDTH);
+        let out = plframe::demap_qpsk(body, &scrambling[..body_len], h.pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH);
         let quarter = body_len / 4;
         let parts: Vec<f32> = (0..4)
             .map(|i| {
@@ -221,7 +228,7 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         llrs.push((h.pls, out.llr));
     }
     if snrs.is_empty() {
-        println!("Gövdesi çözülebilecek pilotsuz QPSK çerçevesi yok.");
+        println!("Gövdesi çözülebilecek QPSK çerçevesi yok.");
         return llrs;
     }
     println!();
@@ -331,6 +338,34 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
         yayının kendisindeki eksik paketleri gösterir."
         );
     }
+    Ok(())
+}
+
+/// Kaydı canlı alıcıdaki gibi küçük parçalarla akış alıcısına verir.
+fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64, ts_path: &std::path::Path) -> Result<(), String> {
+    use qoda::dvbs2::receiver::{Receiver, ReceiverConfig};
+    let mut rx = Receiver::new(ReceiverConfig { sample_rate: fs, offset_hz, symbol_rate: rs, rolloff });
+    let mut ts = Vec::new();
+    for chunk in x.chunks(16_384) {
+        rx.process(chunk, &mut ts);
+    }
+    let s = &rx.stats;
+    println!(
+        "Akış alıcısı: kilit={}, {} çerçeve çözüldü, {} başarısız, {} BCH hatası, {} desteklenmeyen",
+        s.locked, s.frames_ok, s.frames_failed, s.bch_errors, s.frames_unsupported
+    );
+    println!(
+        "  SNR {:.1} dB, taşıyıcı kayması {:+.2} kHz, {} TS paketi, {} CRC hatası",
+        s.snr_db,
+        s.carrier_offset_hz / 1e3,
+        s.ts_packets,
+        s.ts_crc_errors
+    );
+    if let Some(p) = s.pls {
+        println!("  {}", p.describe());
+    }
+    std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
+    println!("  TS dosyası: {}", ts_path.display());
     Ok(())
 }
 

@@ -24,30 +24,73 @@ fn loop_gains(bn: f64, damping: f64) -> (f64, f64) {
     (4.0 * damping * theta / d, 4.0 * theta * theta / d)
 }
 
+/// Parça parça gelen örneklerle çalışan zamanlama kurtarıcı.
+pub struct TimingRecovery {
+    ip: Interpolator,
+    sps: f64,
+    kp: f64,
+    ki: f64,
+    /// İşlenmeyi bekleyen örnekler; `t` bu tampona göre kesirli konumdur.
+    buf: Vec<Complex<f32>>,
+    t: f64,
+    integ: f64,
+    prev: Option<Complex<f32>>,
+}
+
+impl TimingRecovery {
+    /// `sps`: nominal sembol başına örnek. `bn`: döngü bant genişliği (ör. 0.005).
+    pub fn new(sps: f64, bn: f64) -> Self {
+        let (kp, ki) = loop_gains(bn, 0.707);
+        Self {
+            ip: Interpolator::new(),
+            sps,
+            kp,
+            ki,
+            buf: Vec::new(),
+            t: Interpolator::TAPS as f64 + sps,
+            integ: 0.0,
+            prev: None,
+        }
+    }
+
+    /// Şu anki sembol periyodu tahmini (örnek cinsinden).
+    pub fn period(&self) -> f64 {
+        self.sps + self.integ
+    }
+
+    /// `x`: birim güce yakın, eşleştirilmiş filtreden geçmiş örnekler.
+    /// Üretilen semboller `out`a eklenir.
+    pub fn process(&mut self, x: &[Complex<f32>], out: &mut Vec<Complex<f32>>) {
+        self.buf.extend_from_slice(x);
+        let buf = &self.buf;
+        while let (Some(on), Some(mid)) = (self.ip.at(buf, self.t), self.ip.at(buf, self.t - self.period() / 2.0)) {
+            let mut step = self.period();
+            if let Some(p) = self.prev {
+                // Gardner: e > 0 ise örnekleme erken, bir sonraki anı ileri al.
+                let e = ((p - on) * mid.conj()).re as f64;
+                let e = e.clamp(-1.0, 1.0);
+                self.integ += self.sps * self.ki * e;
+                step += self.sps * self.kp * e;
+            }
+            self.prev = Some(on);
+            out.push(on);
+            self.t += step;
+        }
+        // Enterpolatörün ihtiyaç duyacağı kadar geçmişi tutup gerisini at.
+        let keep_from = (self.t - self.sps - Interpolator::TAPS as f64).floor().max(0.0) as usize;
+        let keep_from = keep_from.min(self.buf.len());
+        self.buf.drain(..keep_from);
+        self.t -= keep_from as f64;
+    }
+}
+
 /// `x`: birim güce normalize, eşleştirilmiş filtreden geçmiş örnekler.
 /// `sps`: nominal sembol başına örnek. `bn`: döngü bant genişliği (ör. 0.005).
 pub fn recover(x: &[Complex<f32>], sps: f64, bn: f64) -> TimingResult {
-    let ip = Interpolator::new();
-    let (kp, ki) = loop_gains(bn, 0.707);
-    let mut t = Interpolator::TAPS as f64 + sps;
-    let mut integ = 0.0;
-    let mut prev: Option<Complex<f32>> = None;
+    let mut tr = TimingRecovery::new(sps, bn);
     let mut symbols = Vec::with_capacity((x.len() as f64 / sps) as usize + 1);
-
-    while let (Some(on), Some(mid)) = (ip.at(x, t), ip.at(x, t - (sps + integ) / 2.0)) {
-        let mut step = sps + integ;
-        if let Some(p) = prev {
-            // Gardner: e > 0 ise örnekleme erken, bir sonraki anı ileri al.
-            let e = ((p - on) * mid.conj()).re as f64;
-            let e = e.clamp(-1.0, 1.0);
-            integ += sps * ki * e;
-            step += sps * kp * e;
-        }
-        prev = Some(on);
-        symbols.push(on);
-        t += step;
-    }
-    TimingResult { symbols, final_period: sps + integ }
+    tr.process(x, &mut symbols);
+    TimingResult { symbols, final_period: tr.period() }
 }
 
 #[cfg(test)]
@@ -114,5 +157,14 @@ pub(crate) mod tests {
             .sqrt();
         assert!(evm < 0.1, "EVM {evm}");
         assert!((r.final_period - sps).abs() < 0.01, "periyot {}", r.final_period);
+
+        // Parça parça işleme aynı sembolleri üretmeli.
+        let mut tr = TimingRecovery::new(sps, 0.005);
+        let mut chunked = Vec::new();
+        for part in x.chunks(777) {
+            tr.process(part, &mut chunked);
+        }
+        assert_eq!(chunked.len(), r.symbols.len());
+        assert!(chunked.iter().zip(&r.symbols).all(|(a, b)| (a - b).norm() < 1e-5));
     }
 }

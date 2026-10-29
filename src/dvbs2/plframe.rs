@@ -54,10 +54,27 @@ pub struct Demapped {
     pub snr_db: f32,
 }
 
-/// Pilotsuz QPSK çerçeve gövdesini çözer: karıştırmayı geri alır, karar
-/// yönlendirmeli ikinci derece PLL ile fazı takip eder ve LLR üretir.
-/// `body` başlıktan hemen sonraki semboller, `scrambling` aynı uzunlukta dizi.
-pub fn demap_qpsk(body: &[Complex<f32>], scrambling: &[u8], start: CarrierState, bn: f32) -> Demapped {
+/// Pilotlu çerçevelerde 16 yuvada (1440 veri sembolü) bir gelen pilot bloğunun uzunluğu.
+const PILOT_LEN: usize = 36;
+const PILOT_PERIOD: usize = 16 * 90;
+
+/// Gövdedeki `index`. sembol pilot mu. `pilot_blocks` çerçevedeki pilot bloğu sayısı.
+fn is_pilot(index: usize, pilot_blocks: usize) -> bool {
+    let segment = PILOT_PERIOD + PILOT_LEN;
+    index / segment < pilot_blocks && index % segment >= PILOT_PERIOD
+}
+
+/// QPSK çerçeve gövdesini çözer: karıştırmayı geri alır, karar yönlendirmeli
+/// ikinci derece PLL ile fazı takip eder ve veri sembolleri için LLR üretir.
+/// `body` başlıktan hemen sonraki semboller (varsa pilotlar dahil), `scrambling`
+/// aynı uzunlukta dizi. Pilot sembolleri faz takibinde kullanılır, LLR'ye girmez.
+pub fn demap_qpsk(
+    body: &[Complex<f32>],
+    scrambling: &[u8],
+    pilot_blocks: usize,
+    start: CarrierState,
+    bn: f32,
+) -> Demapped {
     let s = std::f32::consts::FRAC_1_SQRT_2;
     let damping = 0.707f32;
     let theta = bn / (damping + 1.0 / (4.0 * damping));
@@ -68,15 +85,19 @@ pub fn demap_qpsk(body: &[Complex<f32>], scrambling: &[u8], start: CarrierState,
     let mut freq = start.freq;
     let mut llr = Vec::with_capacity(body.len() * 2);
     let (mut sig, mut err) = (0.0f64, 0.0f64);
-    for (z, &k) in body.iter().zip(scrambling) {
+    for (index, (z, &k)) in body.iter().zip(scrambling).enumerate() {
         let r = descramble(*z, k) * Complex::from_polar(1.0, -phase);
-        let decision = Complex::new(s.copysign(r.re), s.copysign(r.im));
+        let pilot = is_pilot(index, pilot_blocks);
+        // Pilotlar bilinen (1 + j)/√2 sembolüdür; veride en yakın QPSK noktası.
+        let decision = if pilot { Complex::new(s, s) } else { Complex::new(s.copysign(r.re), s.copysign(r.im)) };
         let e = (r * decision.conj()).im;
         freq += ki * e;
         // Uzun gövdelerde f32 hassasiyeti kaybolmasın diye fazı sar.
         phase = (phase + freq + kp * e).rem_euclid(std::f32::consts::TAU);
-        llr.push(r.re);
-        llr.push(r.im);
+        if !pilot {
+            llr.push(r.re);
+            llr.push(r.im);
+        }
         let amp = (r * decision.conj()).re;
         sig += (amp * amp) as f64;
         err += (r - decision * amp).norm_sqr() as f64;
@@ -97,6 +118,16 @@ pub fn body_start(header_phase: f32, freq: f32) -> CarrierState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pilot_positions_follow_slot_structure() {
+        // QPSK normal pilotlu: 360 yuva, 22 pilot bloğu; gövde 32400 + 792 sembol.
+        let body_len = 360 * 90 + 22 * 36;
+        let pilots = (0..body_len).filter(|&i| is_pilot(i, 22)).count();
+        assert_eq!(pilots, 22 * 36);
+        assert!(!is_pilot(1439, 22) && is_pilot(1440, 22) && is_pilot(1475, 22) && !is_pilot(1476, 22));
+        assert!(!is_pilot(body_len - 1, 22));
+    }
 
     #[test]
     fn scrambling_starts_with_known_values() {
@@ -125,7 +156,7 @@ mod tests {
                 sym * jk * Complex::from_polar(1.0, 0.4 + w * n as f32)
             })
             .collect();
-        let out = demap_qpsk(&body, &scr, CarrierState { phase: 0.4, freq: w }, 0.01);
+        let out = demap_qpsk(&body, &scr, 0, CarrierState { phase: 0.4, freq: w }, 0.01);
         let errors = out.llr.iter().zip(&bits).filter(|(l, b)| (**l < 0.0) != (**b == 1)).count();
         assert_eq!(errors, 0);
         assert!(out.snr_db > 30.0);

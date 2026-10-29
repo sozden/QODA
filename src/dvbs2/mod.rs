@@ -7,4 +7,5 @@ pub mod ldpc;
 pub mod ldpc_tables;
 pub mod plframe;
 pub mod plheader;
+pub mod receiver;
 pub mod timing;

@@ -76,6 +76,16 @@ impl Pls {
         TABLE.get((self.modcod as usize).checked_sub(1)?).copied()
     }
 
+    /// Çerçevedeki pilot bloğu sayısı (36 sembollük).
+    pub fn pilot_blocks(&self) -> usize {
+        let Some((m, _)) = self.modulation_and_rate() else { return 0 };
+        if !self.pilots {
+            return 0;
+        }
+        let bits = if self.short_frame { 16_200 } else { 64_800 };
+        (bits / m.bits_per_symbol() / 90 - 1) / 16
+    }
+
     /// Başlık dahil PLFRAME uzunluğu (sembol). Ayrılmış MODCOD'larda `None`.
     pub fn frame_len(&self) -> Option<usize> {
         if self.modcod == 0 {
@@ -156,90 +166,133 @@ pub struct HeaderHit {
     pub snr_db: f32,
 }
 
-/// Sembol dizisinde SOF arayıp her bulunan başlığın PLS kodunu çözer.
-///
-/// SOF, ardışık semboller arasındaki faz farkı (diferansiyel) üzerinden aranır;
-/// bu sayede taşıyıcı fazı ve küçük frekans kaymaları aramayı etkilemez.
-pub fn find_headers(symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> {
-    let reference = header_symbols(0);
-    let ref_diff: Vec<Complex<f32>> = (1..SOF_LEN).map(|i| reference[i] * reference[i - 1].conj()).collect();
-    let diff: Vec<Complex<f32>> = (1..symbols.len()).map(|k| symbols[k] * symbols[k - 1].conj()).collect();
+/// Başlık arama için önceden hesaplanan tablolar (referans SOF ve PLS kod kitabı).
+pub struct HeaderSearch {
+    reference: [Complex<f32>; HEADER_LEN],
+    ref_diff: Vec<Complex<f32>>,
+    codebook: Vec<(u8, [f32; 64])>,
+}
 
-    let codebook: Vec<(u8, [f32; 64])> = (0u8..128)
-        .map(|code| {
-            let cw = pls_codeword(code);
-            (code, std::array::from_fn(|i| if (cw >> (63 - i)) & 1 == 0 { 1.0 } else { -1.0 }))
-        })
-        .collect();
+impl Default for HeaderSearch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    let metric = |p: usize| -> (f32, Complex<f32>) {
-        // diff[k] = s[k+1] * conj(s[k]); SOF'un i. farkı diff[p + i - 1]'dedir.
+impl HeaderSearch {
+    pub fn new() -> Self {
+        let reference = header_symbols(0);
+        let ref_diff = (1..SOF_LEN).map(|i| reference[i] * reference[i - 1].conj()).collect();
+        let codebook = (0u8..128)
+            .map(|code| {
+                let cw = pls_codeword(code);
+                (code, std::array::from_fn(|i| if (cw >> (63 - i)) & 1 == 0 { 1.0 } else { -1.0 }))
+            })
+            .collect();
+        Self { reference, ref_diff, codebook }
+    }
+
+    /// `p` konumunda başlayan SOF için normalize ilişki gücü ve ham ilişki.
+    /// `diff[k] = s[k+1]·conj(s[k])`; SOF'un i. farkı `diff[p + i - 1]`'dedir.
+    fn metric(&self, diff: &[Complex<f32>], p: usize) -> (f32, Complex<f32>) {
         let mut c = Complex::default();
         let mut norm = 0.0;
-        for (i, r) in ref_diff.iter().enumerate() {
+        for (i, r) in self.ref_diff.iter().enumerate() {
             let d = diff[p + i];
             c += d * r.conj();
             norm += d.norm();
         }
         (if norm > 0.0 { c.norm() / norm } else { 0.0 }, c)
-    };
+    }
 
-    let mut hits = Vec::new();
-    let mut p = 0;
-    while p + HEADER_LEN < symbols.len() {
-        let (m, _) = metric(p);
-        if m < threshold {
-            p += 1;
-            continue;
-        }
-        // Eşiği aşan bölgedeki en yüksek noktayı al.
-        let mut best = (p, m);
-        for q in p + 1..(p + SOF_LEN).min(symbols.len() - HEADER_LEN) {
-            let (mq, _) = metric(q);
-            if mq > best.1 {
-                best = (q, mq);
+    fn differences(symbols: &[Complex<f32>]) -> Vec<Complex<f32>> {
+        (1..symbols.len()).map(|k| symbols[k] * symbols[k - 1].conj()).collect()
+    }
+
+    /// Sembol dizisinde SOF arayıp eşiği aşan her başlığın PLS kodunu çözer.
+    ///
+    /// SOF, ardışık semboller arasındaki faz farkı (diferansiyel) üzerinden aranır;
+    /// bu sayede taşıyıcı fazı ve küçük frekans kaymaları aramayı etkilemez.
+    pub fn find_all(&self, symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> {
+        let diff = Self::differences(symbols);
+        let mut hits = Vec::new();
+        let mut p = 0;
+        while p + HEADER_LEN < symbols.len() {
+            let (m, _) = self.metric(&diff, p);
+            if m < threshold {
+                p += 1;
+                continue;
             }
+            // Eşiği aşan bölgedeki en yüksek noktayı al.
+            let mut best = (p, m);
+            for q in p + 1..(p + SOF_LEN).min(symbols.len() - HEADER_LEN) {
+                let (mq, _) = self.metric(&diff, q);
+                if mq > best.1 {
+                    best = (q, mq);
+                }
+            }
+            hits.push(self.decode_at(symbols, &diff, best.0));
+            p = best.0 + HEADER_LEN;
         }
-        let pos = best.0;
-        let (sof_metric, c) = metric(pos);
+        hits
+    }
+
+    /// Penceredeki en güçlü SOF konumundaki başlığı çözer (kilitliyken doğrulama için).
+    pub fn best(&self, symbols: &[Complex<f32>]) -> Option<HeaderHit> {
+        if symbols.len() <= HEADER_LEN {
+            return None;
+        }
+        let diff = Self::differences(symbols);
+        let pos = (0..symbols.len() - HEADER_LEN).max_by(|&a, &b| {
+            self.metric(&diff, a).0.total_cmp(&self.metric(&diff, b).0)
+        })?;
+        Some(self.decode_at(symbols, &diff, pos))
+    }
+
+    fn decode_at(&self, symbols: &[Complex<f32>], diff: &[Complex<f32>], pos: usize) -> HeaderHit {
+        let (sof_metric, c) = self.metric(diff, pos);
+        let header = &symbols[pos..pos + HEADER_LEN];
 
         // İlk geçiş: frekansı SOF'tan tahmin edip PLS'i çöz. İkinci geçiş: çözülen
         // kodla 90 sembolün tamamı bilinir; frekansı onlardan yeniden tahmin edip
         // PLS kararını tekrarla.
         let mut w = c.arg();
         let mut known = SOF_LEN;
-        let mut ideal = reference;
+        let mut ideal = self.reference;
         let mut decision = (0u8, 0.0f32);
         for _ in 0..2 {
-            let d = decode_pls(&symbols[pos..pos + HEADER_LEN], w, &ideal[..known], &codebook);
+            let d = decode_pls(header, w, &ideal[..known], &self.codebook);
             decision = d;
             ideal = header_symbols(d.0);
             known = HEADER_LEN;
             let acc: Complex<f32> = (1..HEADER_LEN)
-                .map(|i| symbols[pos + i] * symbols[pos + i - 1].conj() * (ideal[i] * ideal[i - 1].conj()).conj())
+                .map(|i| header[i] * header[i - 1].conj() * (ideal[i] * ideal[i - 1].conj()).conj())
                 .sum();
             w = acc.arg();
         }
         let (code, pls_margin) = decision;
 
         // Bilinen 90 sembolle SNR: genlik ve hata gücü.
-        let aligned = align(&symbols[pos..pos + HEADER_LEN], w, &ideal);
+        let aligned = align(header, w, &ideal);
         let amp = aligned.iter().zip(&ideal).map(|(z, h)| (z * h.conj()).re).sum::<f32>() / HEADER_LEN as f32;
         let noise = aligned.iter().zip(&ideal).map(|(z, h)| (z - h * amp).norm_sqr()).sum::<f32>() / HEADER_LEN as f32;
         let snr_db = 10.0 * (amp * amp / noise.max(1e-12)).log10();
 
-        hits.push(HeaderHit {
+        HeaderHit {
             position: pos,
             pls: Pls::from_code(code),
             sof_metric,
             pls_margin,
             freq_rad_per_symbol: w,
-            phase: carrier_phase(&symbols[pos..pos + HEADER_LEN], w, &ideal),
+            phase: carrier_phase(header, w, &ideal),
             snr_db,
-        });
-        p = pos + HEADER_LEN;
+        }
     }
-    hits
+}
+
+/// Sembol dizisindeki tüm başlıkları arar; bkz. [`HeaderSearch::find_all`].
+pub fn find_headers(symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> {
+    HeaderSearch::new().find_all(symbols, threshold)
 }
 
 /// Başlığın ilk sembolündeki taşıyıcı fazı; frekans kayması `w` çıkarıldıktan
