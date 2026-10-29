@@ -346,9 +346,16 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     use qoda::dvbs2::receiver::{Receiver, ReceiverConfig};
     let mut rx = Receiver::new(ReceiverConfig { sample_rate: fs, offset_hz, symbol_rate: rs, rolloff });
     let mut ts = Vec::new();
+    let started = std::time::Instant::now();
     for chunk in x.chunks(16_384) {
         rx.process(chunk, &mut ts);
     }
+    let elapsed = started.elapsed().as_secs_f64();
+    let duration = x.len() as f64 / fs;
+    println!(
+        "Akış hızı: {duration:.1} s kayıt {elapsed:.2} s'de işlendi ({:.1}× gerçek zaman)",
+        duration / elapsed
+    );
     let s = &rx.stats;
     println!(
         "Akış alıcısı: kilit={}, {} çerçeve çözüldü, {} başarısız, {} BCH hatası, {} desteklenmeyen",

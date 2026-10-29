@@ -147,7 +147,7 @@ impl QodaApp {
         };
         let title = format!("QODA - {:.3} MHz, {:.0} kS/s", self.selected_mhz, self.symbol_rate_ks);
         let d = decoder::spawn(cfg, title);
-        self.send(Command::IqTap(Some(d.iq.clone())));
+        self.send(Command::IqTap(Some((d.iq.clone(), d.dropped.clone()))));
         self.decoder = Some(d);
     }
 
@@ -164,11 +164,13 @@ impl QodaApp {
         let mut text = if s.locked {
             let pls = s.pls.map_or(String::new(), |p| p.describe());
             format!(
-                "Kilitli · {pls} · SNR {:.1} dB · çerçeve {} ✓ {} ✗ · TS {} paket · taşıyıcı {:+.1} kHz",
+                "Kilitli · {pls} · SNR {:.1} dB · çerçeve {} ✓ {} ✗ · LDPC {} it · TS {} paket, {} CC kopukluğu · taşıyıcı {:+.1} kHz",
                 s.snr_db,
                 s.frames_ok,
                 s.frames_failed,
+                s.ldpc_iterations,
                 s.ts_packets,
+                s.ts_cc_errors,
                 s.carrier_offset_hz / 1e3
             )
         } else {
@@ -176,6 +178,10 @@ impl QodaApp {
         };
         if s.frames_unsupported > 0 {
             text += &format!(" · {} çerçeve desteklenmeyen modülasyonda", s.frames_unsupported);
+        }
+        let dropped = d.dropped.load(std::sync::atomic::Ordering::Relaxed);
+        if dropped > 0 {
+            text += &format!(" · {dropped} IQ bloğu atlandı (çözücü yetişemedi)");
         }
         if let Some(p) = &status.player {
             text += &format!(" · {p}");

@@ -56,6 +56,10 @@ pub struct ReceiverStats {
     pub carrier_offset_hz: f64,
     pub ts_packets: u64,
     pub ts_crc_errors: u64,
+    /// Son çerçevede LDPC'nin harcadığı iterasyon.
+    pub ldpc_iterations: usize,
+    /// TS süreklilik sayacı kopuklukları (yayındaki eksik paketler).
+    pub ts_cc_errors: u64,
 }
 
 struct FecState {
@@ -84,6 +88,7 @@ pub struct Receiver {
     fec: Option<FecState>,
     scrambling: Vec<u8>,
     depacketizer: TsDepacketizer,
+    last_cc: std::collections::HashMap<u16, u8>,
     pub stats: ReceiverStats,
 }
 
@@ -107,6 +112,7 @@ impl Receiver {
             fec: None,
             scrambling: Vec::new(),
             depacketizer: TsDepacketizer::default(),
+            last_cc: Default::default(),
             stats: ReceiverStats::default(),
             cfg,
         }
@@ -235,6 +241,22 @@ impl Receiver {
         self.expected = Some(next - cut);
     }
 
+    /// Yeni TS paketlerinde PID başına süreklilik sayacını denetler.
+    fn count_cc_errors(&mut self, packets: &[u8]) {
+        for p in packets.chunks_exact(188) {
+            let pid = (((p[1] & 0x1F) as u16) << 8) | p[2] as u16;
+            if pid == 0x1FFF || p[3] & 0x10 == 0 {
+                continue;
+            }
+            let cc = p[3] & 0x0F;
+            if let Some(prev) = self.last_cc.insert(pid, cc) {
+                if cc != (prev + 1) % 16 && cc != prev {
+                    self.stats.ts_cc_errors += 1;
+                }
+            }
+        }
+    }
+
     fn decode_frame(&mut self, hit: &HeaderHit, ts: &mut Vec<u8>) {
         let pls = hit.pls;
         if pls.modcod == 0 {
@@ -278,6 +300,7 @@ impl Receiver {
 
         let fec = self.fec.as_ref().unwrap();
         let decoded = fec.ldpc.decode(&demapped.llr, LDPC_MAX_ITERATIONS);
+        self.stats.ldpc_iterations = decoded.iterations;
         if !decoded.converged {
             if std::env::var_os("QODA_DEBUG").is_some() {
                 eprintln!(
@@ -301,7 +324,9 @@ impl Receiver {
             .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b))
             .collect();
         bbframe::bb_descramble(&mut bytes);
+        let before = ts.len();
         self.depacketizer.push(&bytes, ts);
+        self.count_cc_errors(&ts[before..]);
         self.stats.ts_packets = self.depacketizer.packets as u64;
         self.stats.ts_crc_errors = self.depacketizer.crc_errors as u64;
     }

@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -25,6 +26,8 @@ pub struct DecoderStatus {
 pub struct Decoder {
     pub iq: SyncSender<Vec<Complex<f32>>>,
     pub status: Arc<Mutex<DecoderStatus>>,
+    /// SDR tarafında, çözücü yetişemediği için atlanan IQ blokları.
+    pub dropped: Arc<AtomicU64>,
 }
 
 pub fn spawn(cfg: ReceiverConfig, title: String) -> Decoder {
@@ -32,7 +35,7 @@ pub fn spawn(cfg: ReceiverConfig, title: String) -> Decoder {
     let status = Arc::new(Mutex::new(DecoderStatus::default()));
     let shared = Arc::clone(&status);
     thread::spawn(move || run(cfg, title, rx, shared));
-    Decoder { iq: tx, status }
+    Decoder { iq: tx, status, dropped: Arc::new(AtomicU64::new(0)) }
 }
 
 fn run(cfg: ReceiverConfig, title: String, rx: Receiver<Vec<Complex<f32>>>, status: Arc<Mutex<DecoderStatus>>) {

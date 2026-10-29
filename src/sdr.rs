@@ -6,7 +6,9 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
+use std::sync::Arc;
 use std::thread;
 
 use num_complex::Complex;
@@ -58,7 +60,8 @@ pub enum Command {
     StartRecording { path: PathBuf, rf_hz: f64 },
     StopRecording,
     /// Okunan her IQ bloğunun kopyasını bu kanala gönder (canlı çözücü için); None durdurur.
-    IqTap(Option<SyncSender<Vec<Complex<f32>>>>),
+    /// Kanal doluyken atlanan bloklar sayaçta tutulur.
+    IqTap(Option<(SyncSender<Vec<Complex<f32>>>, Arc<AtomicU64>)>),
 }
 
 pub struct Frame {
@@ -165,7 +168,7 @@ fn run(
     stream.activate(None)?;
     let mut spectrum = Spectrum::new(s.fft_size);
     let mut recording: Option<Recording> = None;
-    let mut tap: Option<SyncSender<Vec<Complex<f32>>>> = None;
+    let mut tap: Option<(SyncSender<Vec<Complex<f32>>>, Arc<AtomicU64>)> = None;
     let stop_recording = |rec: &mut Option<Recording>| {
         if let Some(mut r) = rec.take() {
             let _ = r.data.flush();
@@ -220,10 +223,13 @@ fn run(
             }
         }
 
-        if let Some(t) = &tap {
+        if let Some((t, dropped)) = &tap {
             // Çözücü yetişemezse blok atlanır; SDR okuması hiç bekletilmez.
             match t.try_send(samples.clone()) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(TrySendError::Disconnected(_)) => tap = None,
             }
         }
