@@ -1,15 +1,16 @@
-//! QODA ana penceresi: cihaz ve frekans kontrolleri, spektrum ve şelale.
+//! QODA ana penceresi: sol panelde alıcı, frekans, yayın ve izleme kartları;
+//! ortada gömülü video, spektrum ve şelale.
 
 use eframe::egui::{
-    self, Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Shape, Stroke, TextureHandle,
-    TextureOptions, Vec2, pos2,
+    self, Align2, Color32, ColorImage, CornerRadius, FontId, Mesh, Pos2, Rect, RichText, Sense, Shape,
+    Stroke, TextureHandle, TextureOptions, Vec2, pos2, vec2,
 };
 
-use qoda::detect::{self, Detection};
-use qoda::tuning;
-use crate::decoder::{self, Decoder};
+use crate::decoder::{self, Decoder, VIDEO_HEIGHT, VIDEO_WIDTH};
 use crate::sdr::{self, Command, DeviceInfo, Event, Frame, Settings};
+use qoda::detect::{self, Detection};
 use qoda::dvbs2::receiver::ReceiverConfig;
+use qoda::tuning;
 
 const FFT_SIZE: usize = 2048;
 const WATERFALL_ROWS: usize = 300;
@@ -20,6 +21,23 @@ const SAMPLE_RATES: [f64; 4] = [1.024, 1.4, 2.048, 2.4];
 /// Kayıtların yazıldığı klasör (çalışma klasörüne göre).
 const RECORDINGS_DIR: &str = "recordings";
 const ROLLOFFS: [f32; 3] = [0.35, 0.25, 0.20];
+
+/// Renk paleti.
+mod palette {
+    use eframe::egui::Color32;
+    pub const BG: Color32 = Color32::from_rgb(11, 15, 22);
+    pub const DEEP: Color32 = Color32::from_rgb(7, 10, 15);
+    pub const CARD: Color32 = Color32::from_rgb(19, 25, 35);
+    pub const BORDER: Color32 = Color32::from_rgb(34, 43, 57);
+    pub const TEXT: Color32 = Color32::from_rgb(214, 222, 235);
+    pub const MUTED: Color32 = Color32::from_rgb(128, 141, 160);
+    pub const ACCENT: Color32 = Color32::from_rgb(56, 200, 240);
+    pub const GOOD: Color32 = Color32::from_rgb(74, 222, 128);
+    pub const WARN: Color32 = Color32::from_rgb(251, 191, 36);
+    pub const BAD: Color32 = Color32::from_rgb(248, 113, 113);
+    pub const BAND: Color32 = Color32::from_rgb(251, 191, 36);
+}
+use palette::*;
 
 pub struct QodaApp {
     devices: Vec<DeviceInfo>,
@@ -37,10 +55,14 @@ pub struct QodaApp {
     sample_rate_ms: f64,
     auto_gain: bool,
     gain_db: f64,
+    /// İzlerken sesi de çal.
+    audio: bool,
 
     detection: Option<Detection>,
     /// Canlı DVB-S2 çözücü (izleme sürerken).
     decoder: Option<Decoder>,
+    video_tex: Option<TextureHandle>,
+    video_seq: u64,
     /// Süren kaydın yolu ve yazılan örnek sayısı.
     recording: Option<(std::path::PathBuf, u64)>,
 
@@ -53,7 +75,8 @@ pub struct QodaApp {
 }
 
 impl QodaApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_theme(&cc.egui_ctx);
         let devices = sdr::list_devices();
         let device_index = devices
             .iter()
@@ -74,12 +97,15 @@ impl QodaApp {
             selected_mhz: 10491.5,
             symbol_rate_ks: 1000.0,
             rolloff: 0.35,
-            sample_rate_ms: 2.048,
+            sample_rate_ms: 2.4,
             auto_gain: false,
             gain_db: 30.0,
+            audio: true,
             detection: None,
-            recording: None,
             decoder: None,
+            video_tex: None,
+            video_seq: 0,
+            recording: None,
             last_frame: None,
             smoothed: Vec::new(),
             range: (-100.0, -40.0),
@@ -118,23 +144,23 @@ impl QodaApp {
     }
 
     fn stop(&mut self) {
-        self.decoder = None;
+        self.stop_watch();
         self.handle = None;
         self.recording = None;
         self.status = "Durduruldu".into();
     }
 
-    fn retune(&mut self, center_mhz: f64) {
+    fn retune(&mut self, ctx: &egui::Context, center_mhz: f64) {
         self.center_mhz = center_mhz;
         self.send(Command::Tune(self.if_hz()));
         // Yayının ofseti değişti; izleme sürüyorsa çözücüyü yeni ayarla başlat.
         if self.decoder.is_some() {
-            self.start_watch();
+            self.start_watch(ctx);
         }
     }
 
-    /// Seçili yayını canlı çözmeye ve video penceresinde göstermeye başlar.
-    fn start_watch(&mut self) {
+    /// Seçili yayını canlı çözmeye ve videoyu göstermeye başlar.
+    fn start_watch(&mut self, ctx: &egui::Context) {
         self.stop_watch();
         if self.handle.is_none() {
             return;
@@ -145,52 +171,18 @@ impl QodaApp {
             symbol_rate: self.symbol_rate_ks as f64 * 1e3,
             rolloff: self.rolloff as f64,
         };
-        let title = format!("QODA - {:.3} MHz, {:.0} kS/s", self.selected_mhz, self.symbol_rate_ks);
-        let d = decoder::spawn(cfg, title);
+        let ctx = ctx.clone();
+        let d = decoder::spawn(cfg, self.audio, move || ctx.request_repaint());
         self.send(Command::IqTap(Some((d.iq.clone(), d.dropped.clone()))));
         self.decoder = Some(d);
+        self.video_seq = 0;
     }
 
     fn stop_watch(&mut self) {
         if self.decoder.take().is_some() {
             self.send(Command::IqTap(None));
         }
-    }
-
-    fn decoder_text(&self) -> Option<(Color32, String)> {
-        let d = self.decoder.as_ref()?;
-        let status = d.status.lock().unwrap().clone();
-        let s = &status.stats;
-        let mut text = if s.locked {
-            let pls = s.pls.map_or(String::new(), |p| p.describe());
-            format!(
-                "Kilitli · {pls} · SNR {:.1} dB · çerçeve {} ✓ {} ✗ · LDPC {} it · TS {} paket, {} CC kopukluğu · taşıyıcı {:+.1} kHz",
-                s.snr_db,
-                s.frames_ok,
-                s.frames_failed,
-                s.ldpc_iterations,
-                s.ts_packets,
-                s.ts_cc_errors,
-                s.carrier_offset_hz / 1e3
-            )
-        } else {
-            "DVB-S2 senkronu aranıyor…".to_string()
-        };
-        if s.frames_unsupported > 0 {
-            text += &format!(" · {} çerçeve desteklenmeyen modülasyonda", s.frames_unsupported);
-        }
-        let dropped = d.dropped.load(std::sync::atomic::Ordering::Relaxed);
-        if dropped > 0 {
-            text += &format!(" · {dropped} IQ bloğu atlandı (çözücü yetişemedi)");
-        }
-        if status.ts_dropped > 0 {
-            text += &format!(" · {} TS parçası atlandı (oynatıcı yetişemedi)", status.ts_dropped);
-        }
-        if let Some(p) = &status.player {
-            text += &format!(" · {p}");
-        }
-        let color = if s.locked { Color32::from_rgb(110, 220, 110) } else { Color32::from_rgb(240, 200, 90) };
-        Some((color, text))
+        self.video_tex = None;
     }
 
     fn poll_events(&mut self) {
@@ -211,11 +203,28 @@ impl QodaApp {
         }
         if let Some(e) = error {
             self.status = format!("Hata: {e}");
+            self.stop_watch();
             self.handle = None;
             self.recording = None;
         }
         if let Some(f) = newest {
             self.push_frame(f);
+        }
+    }
+
+    fn poll_video(&mut self, ctx: &egui::Context) {
+        let Some(d) = &self.decoder else { return };
+        let guard = d.video.lock().unwrap();
+        let Some(frame) = guard.as_ref() else { return };
+        if frame.seq == self.video_seq {
+            return;
+        }
+        self.video_seq = frame.seq;
+        let image = ColorImage::from_rgba_unmultiplied([VIDEO_WIDTH, VIDEO_HEIGHT], &frame.rgba);
+        drop(guard);
+        match &mut self.video_tex {
+            Some(tex) => tex.set(image, TextureOptions::LINEAR),
+            None => self.video_tex = Some(ctx.load_texture("video", image, TextureOptions::LINEAR)),
         }
     }
 
@@ -286,24 +295,6 @@ impl QodaApp {
         }
     }
 
-    fn detection_text(&self) -> String {
-        let Some(d) = &self.detection else {
-            return "Yayın seçmek için spektruma tıklayın".into();
-        };
-        let mut text = format!(
-            "Bulunan: {:.1} kS/s ölçüldü",
-            d.measured_symbol_rate / 1e3
-        );
-        if let Some(r) = d.common_symbol_rate {
-            text += &format!(" (≈ {:.0} kS/s)", r / 1e3);
-        }
-        text += &format!(", roll-off ~{:.2}, SNR {:.1} dB", d.rolloff, d.snr_db);
-        if d.truncated {
-            text += " · yayın spektrum kenarına taşıyor, alıcıyı ortalayın";
-        }
-        text
-    }
-
     fn toggle_recording(&mut self) {
         if self.recording.is_some() {
             self.send(Command::StopRecording);
@@ -324,19 +315,88 @@ impl QodaApp {
         self.recording = Some((std::path::PathBuf::new(), 0));
     }
 
-    fn recording_text(&self) -> Option<String> {
-        let (path, samples) = self.recording.as_ref()?;
-        let seconds = *samples as f64 / (self.sample_rate_ms * 1e6);
-        let mb = *samples as f64 * 8.0 / 1e6;
-        Some(format!("⏺ Kaydediliyor {seconds:.1} s, {mb:.0} MB · {}", path.display()))
+    fn occupied_khz(&self) -> f32 {
+        self.symbol_rate_ks * (1.0 + self.rolloff)
     }
 
-    fn controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            let running = self.handle.is_some();
-            ui.add_enabled_ui(!running, |ui| {
+    // ---- Üst bar ----
+
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("QODA").size(24.0).strong().color(ACCENT));
+            ui.vertical(|ui| {
+                ui.add_space(2.0);
+                ui.label(RichText::new("QO-100 DATV Alıcı").size(13.0).color(TEXT));
+                ui.label(RichText::new("yAtölye").size(11.0).color(MUTED));
+            });
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("YAYIN").size(10.0).color(MUTED));
+                ui.label(RichText::new(format!("{} MHz", group_mhz(self.selected_mhz))).size(22.0).monospace().color(TEXT));
+            });
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("SEMBOL HIZI").size(10.0).color(MUTED));
+                ui.label(RichText::new(format!("{:.0} kS/s", self.symbol_rate_ks)).size(18.0).monospace().color(TEXT));
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let watching = self.decoder.is_some();
+                let watch = if watching {
+                    egui::Button::new(RichText::new("■  İzlemeyi durdur").strong().color(Color32::WHITE)).fill(BAD.gamma_multiply(0.75))
+                } else {
+                    egui::Button::new(RichText::new("▶  İzle").strong().color(DEEP)).fill(ACCENT)
+                };
+                if ui
+                    .add_enabled(self.handle.is_some(), watch.min_size(vec2(150.0, 34.0)).corner_radius(8))
+                    .on_hover_text("Seçili yayını DVB-S2 olarak çöz ve videoyu göster")
+                    .clicked()
+                {
+                    if watching {
+                        self.stop_watch();
+                    } else {
+                        self.start_watch(ui.ctx());
+                    }
+                }
+                let running = self.handle.is_some();
+                let power = if running {
+                    egui::Button::new(RichText::new("⏻  Alıcıyı durdur").color(TEXT))
+                } else {
+                    egui::Button::new(RichText::new("⏻  Alıcıyı başlat").strong().color(DEEP)).fill(GOOD)
+                };
+                if ui
+                    .add_enabled(running || !self.devices.is_empty(), power.min_size(vec2(150.0, 34.0)).corner_radius(8))
+                    .clicked()
+                {
+                    if running {
+                        self.stop();
+                    } else {
+                        self.start(ui.ctx());
+                    }
+                }
+            });
+        });
+    }
+
+    // ---- Sol panel ----
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            card(ui, "ALICI", |ui| self.receiver_card(ui));
+            card(ui, "FREKANS", |ui| self.frequency_card(ui));
+            card(ui, "YAYIN", |ui| self.broadcast_card(ui));
+            card(ui, "İZLEME", |ui| self.watch_card(ui));
+            card(ui, "KAYIT", |ui| self.recording_card(ui));
+        });
+    }
+
+    fn receiver_card(&mut self, ui: &mut egui::Ui) {
+        let running = self.handle.is_some();
+        ui.add_enabled_ui(!running, |ui| {
+            ui.horizontal(|ui| {
                 let current = self.devices.get(self.device_index).map_or("—", |d| d.label.as_str());
-                egui::ComboBox::from_label("Cihaz")
+                egui::ComboBox::from_id_salt("device")
+                    .width(ui.available_width() - 70.0)
                     .selected_text(current)
                     .show_ui(ui, |ui| {
                         for (i, d) in self.devices.iter().enumerate() {
@@ -348,27 +408,9 @@ impl QodaApp {
                     self.device_index = self.device_index.min(self.devices.len().saturating_sub(1));
                 }
             });
-            if running {
-                if ui.button("⏹ Durdur").clicked() {
-                    self.stop();
-                }
-            } else if ui.add_enabled(!self.devices.is_empty(), egui::Button::new("▶ Başlat")).clicked() {
-                self.start(ui.ctx());
-            }
-
-            if running {
-                let label = if self.recording.is_some() { "⏹ Kaydı bitir" } else { "⏺ Kaydet" };
-                if ui
-                    .button(label)
-                    .on_hover_text("Ham IQ örneklerini SigMF olarak recordings klasörüne kaydet. Frekans veya örnekleme hızı değişince kayıt kapanır.")
-                    .clicked()
-                {
-                    self.toggle_recording();
-                }
-            }
-
-            ui.separator();
-            ui.label("Örnekleme");
+        });
+        egui::Grid::new("receiver").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label(RichText::new("Örnekleme").color(MUTED));
             let before = self.sample_rate_ms;
             egui::ComboBox::from_id_salt("rate")
                 .selected_text(format!("{} MS/s", self.sample_rate_ms))
@@ -380,91 +422,228 @@ impl QodaApp {
             if self.sample_rate_ms != before {
                 self.send(Command::SampleRate(self.sample_rate_ms * 1e6));
                 if self.decoder.is_some() {
-                    self.start_watch();
+                    self.start_watch(ui.ctx());
                 }
             }
+            ui.end_row();
 
-            ui.separator();
-            let mut gain_changed = ui.checkbox(&mut self.auto_gain, "Otomatik kazanç").changed();
-            gain_changed |= ui
+            ui.label(RichText::new("Kazanç").color(MUTED));
+            let mut changed = ui.checkbox(&mut self.auto_gain, "Otomatik").changed();
+            ui.end_row();
+            ui.label("");
+            changed |= ui
                 .add_enabled(!self.auto_gain, egui::Slider::new(&mut self.gain_db, 0.0..=50.0).suffix(" dB"))
                 .changed();
-            if gain_changed {
+            if changed {
                 self.send(Command::Gain(self.gain()));
             }
+            ui.end_row();
         });
+    }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("LNB LO");
-            let lo = ui.add(egui::DragValue::new(&mut self.lo_mhz).speed(0.01).range(0.0..=30_000.0).suffix(" MHz"));
-            ui.label("Merkez RF");
-            let center = ui.add(
-                egui::DragValue::new(&mut self.center_mhz).speed(0.01).range(0.0..=30_000.0).fixed_decimals(3).suffix(" MHz"),
-            );
-            if lo.changed() || center.changed() {
-                self.retune(self.center_mhz);
-            }
-            ui.label(format!("IF {:.3} MHz", self.if_hz() / 1e6));
+    fn frequency_card(&mut self, ui: &mut egui::Ui) {
+        let mut retune = false;
+        egui::Grid::new("frequency").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label(RichText::new("LNB LO").color(MUTED));
+            retune |= ui
+                .add(egui::DragValue::new(&mut self.lo_mhz).speed(0.01).range(0.0..=30_000.0).suffix(" MHz"))
+                .changed();
+            ui.end_row();
+            ui.label(RichText::new("Merkez RF").color(MUTED));
+            retune |= ui
+                .add(
+                    egui::DragValue::new(&mut self.center_mhz)
+                        .speed(0.01)
+                        .range(0.0..=30_000.0)
+                        .fixed_decimals(3)
+                        .suffix(" MHz"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label(RichText::new("Ara frekans").color(MUTED));
+            ui.label(RichText::new(format!("{:.3} MHz", self.if_hz() / 1e6)).monospace().color(ACCENT));
+            ui.end_row();
+        });
+        if retune {
+            self.retune(ui.ctx(), self.center_mhz);
+        }
+    }
 
-            ui.separator();
-            ui.label("Yayın");
+    fn broadcast_card(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("broadcast").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label(RichText::new("Frekans").color(MUTED));
             ui.add(
-                egui::DragValue::new(&mut self.selected_mhz).speed(0.001).range(0.0..=30_000.0).fixed_decimals(3).suffix(" MHz"),
+                egui::DragValue::new(&mut self.selected_mhz)
+                    .speed(0.001)
+                    .range(0.0..=30_000.0)
+                    .fixed_decimals(3)
+                    .suffix(" MHz"),
             );
-            if ui.button("Ortala").on_hover_text("Alıcıyı seçili yayına ayarla").clicked() {
-                self.retune(self.selected_mhz);
-            }
-            ui.label("Sembol hızı");
+            ui.end_row();
+            ui.label(RichText::new("Sembol hızı").color(MUTED));
             ui.add(egui::DragValue::new(&mut self.symbol_rate_ks).speed(1.0).range(25.0..=2400.0).suffix(" kS/s"));
-            egui::ComboBox::from_label("Roll-off")
+            ui.end_row();
+            ui.label(RichText::new("Roll-off").color(MUTED));
+            egui::ComboBox::from_id_salt("rolloff")
                 .selected_text(format!("{:.2}", self.rolloff))
                 .show_ui(ui, |ui| {
                     for r in ROLLOFFS {
                         ui.selectable_value(&mut self.rolloff, r, format!("{r:.2}"));
                     }
                 });
-            ui.label(format!("Bant genişliği {:.0} kHz", self.occupied_khz()));
+            ui.end_row();
+            ui.label(RichText::new("Bant genişliği").color(MUTED));
+            ui.label(RichText::new(format!("{:.0} kHz", self.occupied_khz())).monospace());
+            ui.end_row();
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
             if ui.button("Otomatik bul").on_hover_text("Seçili frekanstaki yayının parametrelerini spektrumdan bul").clicked() {
                 self.auto_detect(self.selected_mhz);
             }
-            ui.separator();
-            if self.decoder.is_some() {
-                if ui.button("⏹ İzlemeyi durdur").clicked() {
-                    self.stop_watch();
-                }
-            } else if ui
-                .add_enabled(self.handle.is_some(), egui::Button::new("▶ İzle"))
-                .on_hover_text("Seçili yayını DVB-S2 olarak çöz ve videoyu ayrı pencerede oynat (ffplay)")
-                .clicked()
-            {
-                self.start_watch();
+            if ui.button("Ortala").on_hover_text("Alıcıyı seçili yayına ayarla").clicked() {
+                self.retune(ui.ctx(), self.selected_mhz);
             }
         });
-        ui.label(self.detection_text());
-        if let Some((color, text)) = self.decoder_text() {
-            ui.colored_label(color, text);
+        ui.add_space(2.0);
+        let hint = match &self.detection {
+            None => "Spektrumda yayına tıklayın; çift tıklama ortalar.".to_string(),
+            Some(d) => {
+                let mut t = format!("Ölçülen {:.1} kS/s", d.measured_symbol_rate / 1e3);
+                if let Some(r) = d.common_symbol_rate {
+                    t += &format!(" → {:.0}", r / 1e3);
+                }
+                t += &format!(" · roll-off ~{:.2} · SNR {:.1} dB", d.rolloff, d.snr_db);
+                if d.truncated {
+                    t += " · kenara taşıyor, ortalayın";
+                }
+                t
+            }
+        };
+        ui.label(RichText::new(hint).size(11.0).color(MUTED));
+    }
+
+    fn watch_card(&mut self, ui: &mut egui::Ui) {
+        let before = self.audio;
+        ui.checkbox(&mut self.audio, "Ses");
+        if self.audio != before && self.decoder.is_some() {
+            self.start_watch(ui.ctx());
+        }
+        let Some(d) = &self.decoder else {
+            ui.label(RichText::new("İzleme kapalı").color(MUTED));
+            return;
+        };
+        let status = d.status.lock().unwrap().clone();
+        let dropped = d.dropped.load(std::sync::atomic::Ordering::Relaxed);
+        let s = &status.stats;
+        let (lock_text, lock_color) = if s.locked { ("● Kilitli", GOOD) } else { ("● Senkron aranıyor", WARN) };
+        ui.label(RichText::new(lock_text).strong().color(lock_color));
+        if let Some(p) = s.pls {
+            ui.label(RichText::new(p.describe()).color(TEXT));
+        }
+        ui.add_space(4.0);
+        egui::Grid::new("metrics").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+            metric(ui, "SNR", &format!("{:.1} dB", s.snr_db), snr_color(s.snr_db));
+            metric(ui, "Taşıyıcı", &format!("{:+.1} kHz", s.carrier_offset_hz / 1e3), TEXT);
+            ui.end_row();
+            metric(ui, "Çerçeve ✓", &s.frames_ok.to_string(), GOOD);
+            metric(ui, "Çerçeve ✗", &s.frames_failed.to_string(), if s.frames_failed > 0 { BAD } else { TEXT });
+            ui.end_row();
+            metric(ui, "LDPC", &format!("{} it", s.ldpc_iterations), TEXT);
+            metric(ui, "TS paket", &s.ts_packets.to_string(), TEXT);
+            ui.end_row();
+        });
+        let mut warnings = Vec::new();
+        if s.ts_cc_errors > 0 {
+            warnings.push(format!("{} CC kopukluğu (yayında eksik paket)", s.ts_cc_errors));
+        }
+        if s.frames_unsupported > 0 {
+            warnings.push(format!("{} çerçeve desteklenmeyen modülasyonda", s.frames_unsupported));
+        }
+        if dropped > 0 {
+            warnings.push(format!("{dropped} IQ bloğu atlandı"));
+        }
+        if status.ts_dropped > 0 {
+            warnings.push(format!("{} TS parçası atlandı", status.ts_dropped));
+        }
+        if let Some(p) = &status.player {
+            warnings.push(p.clone());
+        }
+        for w in warnings {
+            ui.label(RichText::new(format!("⚠ {w}")).size(11.0).color(WARN));
         }
     }
 
-    fn occupied_khz(&self) -> f32 {
-        self.symbol_rate_ks * (1.0 + self.rolloff)
+    fn recording_card(&mut self, ui: &mut egui::Ui) {
+        let running = self.handle.is_some();
+        let label = if self.recording.is_some() { "■  Kaydı bitir" } else { "⏺  IQ kaydet" };
+        if ui
+            .add_enabled(running, egui::Button::new(label).min_size(vec2(ui.available_width(), 28.0)))
+            .on_hover_text("Ham IQ örneklerini SigMF olarak recordings klasörüne kaydet. Frekans veya örnekleme hızı değişince kayıt kapanır.")
+            .clicked()
+        {
+            self.toggle_recording();
+        }
+        if let Some((path, samples)) = &self.recording {
+            let seconds = *samples as f64 / (self.sample_rate_ms * 1e6);
+            let mb = *samples as f64 * 8.0 / 1e6;
+            ui.label(RichText::new(format!("● {seconds:.1} s · {mb:.0} MB")).color(BAD));
+            ui.label(RichText::new(path.display().to_string()).size(10.0).color(MUTED));
+        }
+    }
+
+    // ---- Orta alan ----
+
+    fn video(&self, ui: &mut egui::Ui, rect: Rect) {
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::same(10), DEEP);
+        painter.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        // 16:9 alanı dikdörtgene sığdır.
+        let aspect = VIDEO_WIDTH as f32 / VIDEO_HEIGHT as f32;
+        let inner = rect.shrink(6.0);
+        let size = if inner.width() / inner.height() > aspect {
+            vec2(inner.height() * aspect, inner.height())
+        } else {
+            vec2(inner.width(), inner.width() / aspect)
+        };
+        let video_rect = Rect::from_center_size(inner.center(), size);
+        match &self.video_tex {
+            Some(tex) => {
+                painter.image(tex.id(), video_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                let locked = self
+                    .decoder
+                    .as_ref()
+                    .is_some_and(|d| d.status.lock().unwrap().stats.locked);
+                let text = if locked { "Video bekleniyor…" } else { "DVB-S2 senkronu aranıyor…" };
+                painter.text(video_rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(18.0), MUTED);
+            }
+        }
+        if let Some(d) = &self.decoder {
+            let s = d.status.lock().unwrap().stats.clone();
+            if s.locked {
+                let badge = Rect::from_min_size(video_rect.min + vec2(10.0, 10.0), vec2(72.0, 24.0));
+                painter.rect_filled(badge, CornerRadius::same(6), Color32::from_black_alpha(160));
+                painter.text(badge.center(), Align2::CENTER_CENTER, "● CANLI", FontId::proportional(13.0), BAD);
+            }
+        }
     }
 
     /// Spektrum ve şelaleyi çizer; tıklama yayın seçer, çift tıklama alıcıyı ortalar.
-    fn display(&mut self, ui: &mut egui::Ui) {
+    fn spectrum(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let tex = self
             .waterfall_tex
             .get_or_insert_with(|| ui.ctx().load_texture("waterfall", self.waterfall.clone(), TextureOptions::LINEAR))
             .clone();
+        let response = ui.interact(rect, ui.id().with("spectrum"), Sense::click());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::same(10), DEEP);
 
-        let size = ui.available_size();
-        let (response, painter) = ui.allocate_painter(size, Sense::click());
-        let full = response.rect;
-        let spec_rect = Rect::from_min_size(full.min, Vec2::new(full.width(), full.height() * 0.45));
-        let axis_h = 18.0;
+        let full = rect.shrink(1.0);
+        let spec_rect = Rect::from_min_size(full.min, Vec2::new(full.width(), full.height() * 0.48));
+        let axis_h = 20.0;
         let wf_rect = Rect::from_min_max(pos2(full.left(), spec_rect.bottom() + axis_h), full.max);
-
-        painter.rect_filled(spec_rect, 0.0, Color32::from_rgb(12, 16, 24));
         painter.image(tex.id(), wf_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
 
         // Çizilen spektrum, karenin ayarlandığı merkeze göre konumlanır.
@@ -475,33 +654,38 @@ impl QodaApp {
         // dB ızgarası.
         let (lo, hi) = self.range;
         let y_of = |db: f32| spec_rect.bottom() - (db - lo) / (hi - lo) * spec_rect.height();
-        let grid = Color32::from_gray(50);
+        let grid = Color32::from_rgb(26, 34, 46);
         let mut db = (lo / 10.0).ceil() * 10.0;
         while db < hi {
             let y = y_of(db);
             painter.line_segment([pos2(spec_rect.left(), y), pos2(spec_rect.right(), y)], Stroke::new(1.0, grid));
-            painter.text(pos2(spec_rect.left() + 4.0, y), Align2::LEFT_BOTTOM, format!("{db:.0} dB"), FontId::monospace(10.0), Color32::GRAY);
+            painter.text(pos2(spec_rect.left() + 6.0, y - 1.0), Align2::LEFT_BOTTOM, format!("{db:.0} dB"), FontId::monospace(10.0), MUTED);
             db += 10.0;
         }
 
         // Frekans ekseni: 250 kHz aralıklı işaretler.
         let step = 0.25;
         let mut f = ((frame_center - span_mhz / 2.0) / step).ceil() * step;
+        let axis = Rect::from_min_max(pos2(full.left(), spec_rect.bottom()), pos2(full.right(), wf_rect.top()));
+        painter.rect_filled(axis, CornerRadius::ZERO, BG);
         while f <= frame_center + span_mhz / 2.0 {
             let x = x_of(f);
             painter.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(1.0, grid));
-            painter.text(pos2(x, spec_rect.bottom() + 2.0), Align2::CENTER_TOP, format!("{f:.2}"), FontId::monospace(11.0), Color32::LIGHT_GRAY);
+            painter.text(pos2(x, axis.center().y), Align2::CENTER_CENTER, format!("{f:.2}"), FontId::monospace(11.0), MUTED);
             f += step;
         }
 
         // Seçili yayının kapladığı bant.
         let half = self.occupied_khz() as f64 / 2000.0;
         let band = Rect::from_x_y_ranges(x_of(self.selected_mhz - half)..=x_of(self.selected_mhz + half), spec_rect.y_range());
-        painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(80, 160, 255, 40));
+        painter.rect_filled(band, CornerRadius::ZERO, BAND.gamma_multiply(0.10));
+        for x in [band.left(), band.right()] {
+            painter.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(1.0, BAND.gamma_multiply(0.5)));
+        }
         let sx = x_of(self.selected_mhz);
-        painter.line_segment([pos2(sx, spec_rect.top()), pos2(sx, wf_rect.bottom())], Stroke::new(1.0, Color32::from_rgb(80, 160, 255)));
+        painter.line_segment([pos2(sx, spec_rect.top()), pos2(sx, wf_rect.bottom())], Stroke::new(1.0, BAND.gamma_multiply(0.8)));
 
-        // Spektrum çizgisi.
+        // Spektrum: altı renk geçişli dolgu, üstü çizgi.
         if !self.smoothed.is_empty() {
             let n = self.smoothed.len();
             let points: Vec<Pos2> = self
@@ -513,65 +697,195 @@ impl QodaApp {
                     pos2(x, y_of(v).clamp(spec_rect.top(), spec_rect.bottom()))
                 })
                 .collect();
-            painter.add(Shape::line(points, Stroke::new(1.5, Color32::from_rgb(255, 210, 80))));
+            let mut mesh = Mesh::default();
+            for p in &points {
+                let t = 1.0 - (p.y - spec_rect.top()) / spec_rect.height();
+                mesh.colored_vertex(*p, ACCENT.gamma_multiply(0.15 + 0.35 * t));
+                mesh.colored_vertex(pos2(p.x, spec_rect.bottom()), ACCENT.gamma_multiply(0.02));
+            }
+            for i in 0..n as u32 - 1 {
+                let a = 2 * i;
+                mesh.add_triangle(a, a + 1, a + 2);
+                mesh.add_triangle(a + 1, a + 3, a + 2);
+            }
+            painter.add(Shape::mesh(mesh));
+            painter.add(Shape::line(points, Stroke::new(1.4, ACCENT)));
         }
 
         // Fare imleci altındaki frekans.
         if let Some(pos) = response.hover_pos() {
-            painter.line_segment([pos2(pos.x, spec_rect.top()), pos2(pos.x, spec_rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(80)));
-            painter.text(
-                pos2(pos.x + 6.0, spec_rect.top() + 4.0),
-                Align2::LEFT_TOP,
-                format!("{:.3} MHz", mhz_of(pos.x)),
-                FontId::monospace(12.0),
-                Color32::WHITE,
-            );
+            painter.line_segment([pos2(pos.x, spec_rect.top()), pos2(pos.x, wf_rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(60)));
+            let label = format!("{:.3} MHz", mhz_of(pos.x));
+            let galley = painter.layout_no_wrap(label, FontId::monospace(12.0), TEXT);
+            let at = pos2((pos.x + 8.0).min(spec_rect.right() - galley.size().x - 12.0), spec_rect.top() + 8.0);
+            let bg = Rect::from_min_size(at - vec2(6.0, 3.0), galley.size() + vec2(12.0, 6.0));
+            painter.rect_filled(bg, CornerRadius::same(4), Color32::from_black_alpha(180));
+            painter.galley(at, galley, TEXT);
         }
         if let Some(pos) = response.interact_pointer_pos() {
             if response.double_clicked() {
                 self.selected_mhz = mhz_of(pos.x);
                 self.auto_detect(self.selected_mhz);
-                self.retune(self.selected_mhz);
+                self.retune(ui.ctx(), self.selected_mhz);
             } else if response.clicked() {
                 self.selected_mhz = mhz_of(pos.x);
                 self.auto_detect(self.selected_mhz);
             }
         }
     }
+
+    fn central(&mut self, ui: &mut egui::Ui) {
+        let area = ui.available_rect_before_wrap();
+        ui.allocate_rect(area, Sense::hover());
+        if self.decoder.is_some() {
+            // Video üstte, en fazla alanın %62'si; spektrum altta.
+            let video_h = (area.width() / (VIDEO_WIDTH as f32 / VIDEO_HEIGHT as f32)).min(area.height() * 0.62);
+            let video_rect = Rect::from_min_size(area.min, vec2(area.width(), video_h));
+            let spec_rect = Rect::from_min_max(pos2(area.left(), video_rect.bottom() + 8.0), area.max);
+            self.video(ui, video_rect);
+            self.spectrum(ui, spec_rect);
+        } else {
+            self.spectrum(ui, area);
+        }
+    }
+
+    fn status_bar(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let (dot, color) = if self.handle.is_some() { ("●", GOOD) } else { ("●", MUTED) };
+            ui.label(RichText::new(dot).color(color));
+            ui.label(RichText::new(&self.status).size(12.0).color(MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new("QODA · yAtölye · GPL-3.0").size(11.0).color(MUTED));
+            });
+        });
+    }
 }
 
 impl eframe::App for QodaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_events();
-        egui::Panel::top("controls").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.controls(ui);
-            ui.add_space(4.0);
+        let ctx = ui.ctx().clone();
+        self.poll_video(&ctx);
+
+        let bar = egui::Frame::new().fill(CARD).inner_margin(egui::Margin::symmetric(14, 8));
+        egui::Panel::top("header").frame(bar).show(ui, |ui| self.header(ui));
+        egui::Panel::bottom("status")
+            .frame(egui::Frame::new().fill(DEEP).inner_margin(egui::Margin::symmetric(12, 4)))
+            .show(ui, |ui| self.status_bar(ui));
+        egui::Panel::left("sidebar")
+            .resizable(true)
+            .default_size(300.0)
+            .size_range(260.0..=440.0)
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(10)))
+            .show(ui, |ui| self.sidebar(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(10)))
+            .show(ui, |ui| self.central(ui));
+    }
+}
+
+/// Başlıklı, kenarlıklı bir kart.
+fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(CARD)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title).size(11.0).strong().color(ACCENT));
+            ui.add_space(6.0);
+            add(ui);
         });
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                match self.recording_text() {
-                    Some(t) => ui.colored_label(Color32::from_rgb(255, 90, 90), t),
-                    None => ui.label(&self.status),
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label("QODA · yAtölye");
-                });
+    ui.add_space(10.0);
+}
+
+/// Küçük etiketli ölçüm kutucuğu.
+fn metric(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
+    egui::Frame::new()
+        .fill(DEEP)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_min_width(108.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).size(10.0).color(MUTED));
+                ui.label(RichText::new(value).size(14.0).monospace().color(color));
             });
         });
-        egui::CentralPanel::default().show(ui, |ui| self.display(ui));
+}
+
+fn snr_color(snr_db: f32) -> Color32 {
+    if snr_db >= 8.0 {
+        GOOD
+    } else if snr_db >= 5.0 {
+        WARN
+    } else {
+        BAD
     }
+}
+
+/// 10491.527 → "10 491.527" (binlik ayıraçla okunaklı frekans).
+fn group_mhz(mhz: f64) -> String {
+    let text = format!("{mhz:.3}");
+    let (int, frac) = text.split_once('.').unwrap_or((&text, ""));
+    let mut grouped = String::new();
+    for (i, c) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            grouped.push(' ');
+        }
+        grouped.push(c);
+    }
+    format!("{grouped}.{frac}")
+}
+
+/// Koyu, lacivert tonlu tema.
+fn apply_theme(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        let mut v = egui::Visuals::dark();
+        v.panel_fill = BG;
+        v.window_fill = CARD;
+        v.extreme_bg_color = DEEP;
+        v.faint_bg_color = CARD;
+        v.window_corner_radius = CornerRadius::same(10);
+        v.window_stroke = Stroke::new(1.0, BORDER);
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+        v.selection.stroke = Stroke::new(1.0, ACCENT);
+        v.hyperlink_color = ACCENT;
+        let radius = CornerRadius::same(6);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+        v.widgets.noninteractive.corner_radius = radius;
+        for (w, fill) in [
+            (&mut v.widgets.inactive, Color32::from_rgb(28, 36, 49)),
+            (&mut v.widgets.hovered, Color32::from_rgb(38, 50, 67)),
+            (&mut v.widgets.active, Color32::from_rgb(48, 64, 86)),
+            (&mut v.widgets.open, Color32::from_rgb(38, 50, 67)),
+        ] {
+            w.bg_fill = fill;
+            w.weak_bg_fill = fill;
+            w.corner_radius = radius;
+        }
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.6));
+        v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
+        style.visuals = v;
+        style.spacing.item_spacing = vec2(8.0, 6.0);
+        style.spacing.button_padding = vec2(10.0, 5.0);
+        style.spacing.interact_size.y = 24.0;
+    });
 }
 
 /// 0..1 aralığındaki değeri koyu maviden sarıya/kırmızıya giden renge çevirir.
 fn colormap(t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
-    const STOPS: [(f32, [f32; 3]); 5] = [
-        (0.0, [0.0, 0.0, 0.05]),
-        (0.3, [0.0, 0.1, 0.5]),
-        (0.55, [0.0, 0.7, 0.8]),
-        (0.8, [1.0, 0.85, 0.1]),
-        (1.0, [1.0, 0.2, 0.1]),
+    const STOPS: [(f32, [f32; 3]); 6] = [
+        (0.0, [0.02, 0.03, 0.06]),
+        (0.25, [0.05, 0.12, 0.35]),
+        (0.5, [0.05, 0.55, 0.75]),
+        (0.7, [0.45, 0.85, 0.65]),
+        (0.85, [1.0, 0.85, 0.2]),
+        (1.0, [1.0, 0.3, 0.15]),
     ];
     let i = STOPS.iter().rposition(|(p, _)| *p <= t).unwrap_or(0).min(STOPS.len() - 2);
     let (p0, c0) = STOPS[i];

@@ -1,11 +1,15 @@
-//! Canlı çözücü: SDR'dan gelen IQ bloklarını DVB-S2 alıcısından geçirir ve
-//! çıkan MPEG-TS'yi video oynatıcıya (ffplay) aktarır.
+//! Canlı çözücü: SDR'dan gelen IQ bloklarını DVB-S2 alıcısından geçirir; çıkan
+//! MPEG-TS'yi görüntü için ffmpeg'e, ses için penceresiz ffplay'e aktarır.
+//!
+//! ffmpeg TS'yi çözüp sabit boyutlu ham RGBA kareler üretir; kareler arayüzde
+//! doku olarak gösterilir. Çözücü hiçbir oynatıcıyı beklemez: yazma işleri ayrı
+//! iş parçacıklarındadır ve kuyruk dolarsa IQ değil TS parçası atlanır.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::AtomicU64;
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -14,41 +18,76 @@ use qoda::dvbs2::receiver::{Receiver as DvbReceiver, ReceiverConfig, ReceiverSta
 
 /// SDR ile çözücü arasında bekleyebilecek en fazla IQ bloğu.
 const QUEUE_BLOCKS: usize = 64;
-/// Çözücü ile oynatıcı arasında bekleyebilecek en fazla TS parçası.
+/// Çözücü ile her oynatıcı arasında bekleyebilecek en fazla TS parçası.
 const TS_QUEUE_CHUNKS: usize = 1024;
+/// ffmpeg'in ürettiği kare boyutu; görüntü en-boy oranı korunarak sığdırılır.
+pub const VIDEO_WIDTH: usize = 1280;
+pub const VIDEO_HEIGHT: usize = 720;
 
 #[derive(Default, Clone)]
 pub struct DecoderStatus {
     pub stats: ReceiverStats,
-    /// Oynatıcı sorunu ya da kapanması gibi bilgiler.
+    /// Oynatıcı sorunları gibi bilgiler.
     pub player: Option<String>,
-    /// Oynatıcı yetişemediği için atlanan TS parçaları.
+    /// Oynatıcılar yetişemediği için atlanan TS parçaları.
     pub ts_dropped: u64,
 }
 
-/// Çalışan çözücüye bağlantı. Düşürüldüğünde çözücü ve oynatıcı kapanır.
+/// Son çözülen video karesi.
+pub struct VideoFrame {
+    pub rgba: Vec<u8>,
+    /// Her yeni karede artar; arayüz yalnızca değişince dokuyu günceller.
+    pub seq: u64,
+}
+
+/// Çalışan çözücüye bağlantı. Düşürüldüğünde çözücü ve oynatıcılar kapanır.
 pub struct Decoder {
     pub iq: SyncSender<Vec<Complex<f32>>>,
     pub status: Arc<Mutex<DecoderStatus>>,
     /// SDR tarafında, çözücü yetişemediği için atlanan IQ blokları.
     pub dropped: Arc<AtomicU64>,
+    pub video: Arc<Mutex<Option<VideoFrame>>>,
 }
 
-pub fn spawn(cfg: ReceiverConfig, title: String) -> Decoder {
+/// `audio` false ise ses oynatıcısı başlatılmaz. `notify` her yeni karede çağrılır.
+pub fn spawn(cfg: ReceiverConfig, audio: bool, notify: impl Fn() + Send + 'static) -> Decoder {
     let (tx, rx) = sync_channel(QUEUE_BLOCKS);
     let status = Arc::new(Mutex::new(DecoderStatus::default()));
-    let shared = Arc::clone(&status);
-    thread::spawn(move || run(cfg, title, rx, shared));
-    Decoder { iq: tx, status, dropped: Arc::new(AtomicU64::new(0)) }
+    let video = Arc::new(Mutex::new(None));
+    let (s, v) = (Arc::clone(&status), Arc::clone(&video));
+    thread::spawn(move || run(cfg, audio, rx, s, v, notify));
+    Decoder { iq: tx, status, dropped: Arc::new(AtomicU64::new(0)), video }
 }
 
-fn run(cfg: ReceiverConfig, title: String, rx: Receiver<Vec<Complex<f32>>>, status: Arc<Mutex<DecoderStatus>>) {
+fn run(
+    cfg: ReceiverConfig,
+    audio: bool,
+    rx: Receiver<Vec<Complex<f32>>>,
+    status: Arc<Mutex<DecoderStatus>>,
+    video: Arc<Mutex<Option<VideoFrame>>>,
+    notify: impl Fn() + Send + 'static,
+) {
     let mut receiver = DvbReceiver::new(cfg);
-    // TS ayrı bir iş parçacığıyla oynatıcıya yazılır: oynatıcı okumayı geciktirse de
-    // çözücü beklemez. Kuyruk dolarsa IQ değil TS atlanır.
-    let (ts_tx, ts_rx) = sync_channel::<Vec<u8>>(TS_QUEUE_CHUNKS);
-    let writer_status = Arc::clone(&status);
-    let writer = thread::spawn(move || write_to_player(&title, ts_rx, writer_status));
+    let mut sinks: Vec<SyncSender<Arc<Vec<u8>>>> = Vec::new();
+    let mut children: Vec<Child> = Vec::new();
+
+    match start_video(Arc::clone(&video), notify) {
+        Ok((child, stdin)) => {
+            sinks.push(spawn_writer(stdin, Arc::clone(&status)));
+            children.push(child);
+        }
+        Err(e) => status.lock().unwrap().player = Some(e),
+    }
+    if audio {
+        match start_audio() {
+            Ok(mut child) => {
+                let stdin = child.stdin.take().unwrap();
+                sinks.push(spawn_writer(stdin, Arc::clone(&status)));
+                children.push(child);
+            }
+            Err(e) => status.lock().unwrap().player = Some(e),
+        }
+    }
 
     let mut ts = Vec::new();
     let mut ts_dropped = 0u64;
@@ -56,49 +95,82 @@ fn run(cfg: ReceiverConfig, title: String, rx: Receiver<Vec<Complex<f32>>>, stat
         ts.clear();
         receiver.process(&block, &mut ts);
         if !ts.is_empty() {
-            match ts_tx.try_send(ts.clone()) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => ts_dropped += 1,
-                Err(TrySendError::Disconnected(_)) => {}
+            let chunk = Arc::new(ts.clone());
+            for sink in &sinks {
+                if let Err(TrySendError::Full(_)) = sink.try_send(Arc::clone(&chunk)) {
+                    ts_dropped += 1;
+                }
             }
         }
         let mut st = status.lock().unwrap();
         st.stats = receiver.stats.clone();
         st.ts_dropped = ts_dropped;
     }
-    drop(ts_tx);
-    let _ = writer.join();
-}
-
-fn write_to_player(title: &str, ts: Receiver<Vec<u8>>, status: Arc<Mutex<DecoderStatus>>) {
-    let mut child = match start_player(title) {
-        Ok(child) => child,
-        Err(e) => {
-            status.lock().unwrap().player = Some(e);
-            // Kuyruğu boşaltmaya devam et ki çözücü TS atladığını sanmasın.
-            while ts.recv().is_ok() {}
-            return;
-        }
-    };
-    while let Ok(chunk) = ts.recv() {
-        let ok = child.stdin.as_mut().is_some_and(|stdin| stdin.write_all(&chunk).is_ok());
-        if !ok {
-            status.lock().unwrap().player = Some("Video penceresi kapandı".into());
-            break;
-        }
+    drop(sinks);
+    for mut child in children {
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    while ts.recv().is_ok() {}
 }
 
-/// ffplay'i standart girdiden TS okuyacak şekilde başlatır.
-fn start_player(title: &str) -> Result<Child, String> {
-    let exe = find_ffplay().ok_or("ffplay bulunamadı (FFmpeg kurulu ve PATH'te olmalı)")?;
-    Command::new(exe)
-        // -infbuf: ffplay giriş tamponunu sınırlamaz, okumayı hiç durdurmaz.
-        .args(["-hide_banner", "-loglevel", "error", "-infbuf", "-framedrop"])
-        .args(["-window_title", title, "-i", "-"])
+/// TS parçalarını bir oynatıcının standart girdisine yazan iş parçacığı.
+fn spawn_writer(mut stdin: ChildStdin, status: Arc<Mutex<DecoderStatus>>) -> SyncSender<Arc<Vec<u8>>> {
+    let (tx, rx) = sync_channel::<Arc<Vec<u8>>>(TS_QUEUE_CHUNKS);
+    thread::spawn(move || {
+        while let Ok(chunk) = rx.recv() {
+            if stdin.write_all(&chunk).is_err() {
+                status.lock().unwrap().player = Some("Oynatıcı kapandı".into());
+                break;
+            }
+        }
+        // Gönderen taraf takılmasın diye kuyruğu boşaltmaya devam et.
+        while rx.recv().is_ok() {}
+    });
+    tx
+}
+
+/// ffmpeg'i TS'den ham RGBA kare üretecek şekilde başlatır ve kareleri okuyan
+/// iş parçacığını kurar.
+fn start_video(
+    video: Arc<Mutex<Option<VideoFrame>>>,
+    notify: impl Fn() + Send + 'static,
+) -> Result<(Child, ChildStdin), String> {
+    let exe = find_ffmpeg_tool("ffmpeg").ok_or("ffmpeg bulunamadı (FFmpeg kurulu ve PATH'te olmalı)")?;
+    let filter = format!(
+        "scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,\
+         pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
+    );
+    let mut child = background(Command::new(exe))
+        .args(["-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay"])
+        .args(["-probesize", "500000", "-analyzeduration", "1000000", "-i", "-"])
+        .args(["-an", "-sn", "-vf", &filter, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("ffmpeg başlatılamadı: {e}"))?;
+    let stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    thread::spawn(move || {
+        let mut seq = 0;
+        loop {
+            let mut rgba = vec![0u8; VIDEO_WIDTH * VIDEO_HEIGHT * 4];
+            if stdout.read_exact(&mut rgba).is_err() {
+                return;
+            }
+            seq += 1;
+            *video.lock().unwrap() = Some(VideoFrame { rgba, seq });
+            notify();
+        }
+    });
+    Ok((child, stdin))
+}
+
+/// Sesi penceresiz ffplay ile çalar.
+fn start_audio() -> Result<Child, String> {
+    let exe = find_ffmpeg_tool("ffplay").ok_or("ses için ffplay bulunamadı")?;
+    background(Command::new(exe))
+        .args(["-hide_banner", "-loglevel", "error", "-nodisp", "-infbuf", "-vn", "-sn", "-i", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -106,13 +178,24 @@ fn start_player(title: &str) -> Result<Child, String> {
         .map_err(|e| format!("ffplay başlatılamadı: {e}"))
 }
 
-/// Önce PATH'te, Windows'ta ayrıca winget'in FFmpeg kurulum klasöründe arar.
-fn find_ffplay() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "ffplay.exe" } else { "ffplay" };
+/// Windows'ta alt sürecin kendi konsol penceresini açmasını engeller.
+fn background(mut cmd: Command) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// FFmpeg aracını önce PATH'te, Windows'ta ayrıca winget'in kurulum klasöründe arar.
+fn find_ffmpeg_tool(tool: &str) -> Option<PathBuf> {
+    let name = if cfg!(windows) { format!("{tool}.exe") } else { tool.to_string() };
     let in_path = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|dir| dir.join(name))
+        .map(|dir| dir.join(&name))
         .find(|p| p.is_file());
     if in_path.is_some() {
         return in_path;
@@ -123,6 +206,6 @@ fn find_ffplay() -> Option<PathBuf> {
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().contains("FFmpeg"))
         .flat_map(|pkg| std::fs::read_dir(pkg.path()).into_iter().flatten().flatten())
-        .map(|build| build.path().join("bin").join(name))
+        .map(|build| build.path().join("bin").join(&name))
         .find(|p| p.is_file())
 }
