@@ -17,6 +17,7 @@ Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR ci
 2. `cargo run --release` ile QODA'yı başlatın.
 3. Cihazı seçip **Başlat**'a basın. LNB LO ve merkez RF frekansını girin; IF otomatik hesaplanır.
 4. Spektrumda bir yayına **tıklayın** (seçer) ya da **çift tıklayın** (seçer ve alıcıyı oraya ortalar). Sembol hızı ve roll-off'a göre kaplanan bant mavi olarak gösterilir.
+   Frekans göstergelerinde (YAYIN, Merkez RF) farenin altındaki rakam tekerlekle değişir; rakamın üst yarısına tıklamak artırır, alt yarısı azaltır. Spektrumda tekerlek seçili yayını 10 kHz (Shift ile 100 kHz) kaydırır, sürüklemek alıcıyı kaydırır. Spektrumun üstündeki **Yayınlar** şeridinde görünen bandda bulunan yayınlar listelenir; tıklayınca o yayına geçilir.
 5. **▶ İzle** seçili yayını canlı olarak DVB-S2 çözer; video programın içinde, spektrumun üstünde gösterilir, ses ayrıca çalınır. Kilit durumu, MODCOD, SNR ve çerçeve sayaçları İzleme kartında görünür. Video ve ses için [FFmpeg](https://ffmpeg.org/) kurulu olmalıdır (ör. `winget install Gyan.FFmpeg`).
 6. **⏺ Kaydet** ham IQ'yu SigMF olarak kaydeder; kayıtlar `qoda-analyze <kayıt>` ile çözülebilir.
 
