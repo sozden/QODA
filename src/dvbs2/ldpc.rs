@@ -31,7 +31,7 @@ pub struct Decoded {
 impl LdpcCode {
     /// `rows`: standart tablonun satırları (her biri bir bilgi grubunun adresleri).
     /// `group`: grup boyutu (DVB-S2'de 360; testlerde küçük değerler kullanılabilir).
-    pub fn from_table(n: usize, k: usize, group: usize, rows: &[&[u32]]) -> Self {
+    pub fn from_table(n: usize, k: usize, group: usize, rows: &[&[u16]]) -> Self {
         let m = n - k;
         assert_eq!(k % group, 0, "k grup boyutunun katı olmalı");
         assert_eq!(rows.len(), k / group, "tablo satır sayısı k / grup olmalı");
@@ -142,10 +142,10 @@ mod tests {
 
     /// Küçük, DVB-S2 yapısında bir test kodu: n = 720, k = 360, grup 36.
     fn test_code() -> LdpcCode {
-        let rows: Vec<Vec<u32>> = (0..10u32)
+        let rows: Vec<Vec<u16>> = (0..10u16)
             .map(|r| vec![(r * 37 + 5) % 360, (r * 101 + 77) % 360, (r * 211 + 151) % 360])
             .collect();
-        let refs: Vec<&[u32]> = rows.iter().map(|r| r.as_slice()).collect();
+        let refs: Vec<&[u16]> = rows.iter().map(|r| r.as_slice()).collect();
         LdpcCode::from_table(720, 360, 36, &refs)
     }
 

@@ -8,6 +8,8 @@ use std::process::ExitCode;
 use num_complex::Complex;
 use qoda::detect;
 use qoda::dsp::Spectrum;
+use qoda::dvbs2::bbframe::{self, TsDepacketizer};
+use qoda::dvbs2::fec::FecParams;
 use qoda::dvbs2::{filters, plframe, plheader, timing};
 
 const SOF_THRESHOLD: f32 = 0.7;
@@ -16,6 +18,7 @@ const MIN_PLS_MARGIN: f32 = 0.2;
 const TIMING_BANDWIDTH: f64 = 0.005;
 /// Çerçeve gövdesindeki taşıyıcı takip döngüsünün bant genişliği.
 const CARRIER_BANDWIDTH: f32 = 0.002;
+const LDPC_MAX_ITERATIONS: usize = 50;
 
 struct Args {
     path: PathBuf,
@@ -177,14 +180,15 @@ fn run() -> Result<(), String> {
         mean_df / 1e3
     );
 
-    demap_frames(&symbols, &hits);
-    Ok(())
+    let llrs = demap_frames(&symbols, &hits);
+    decode_frames(&llrs, &args.path.with_extension("ts"))
 }
 
 /// Pilotsuz QPSK çerçevelerinin gövdelerini çözüp gövde boyunca SNR'ı raporlar.
-fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) {
+fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(plheader::Pls, Vec<f32>)> {
     let mut scrambling: Vec<u8> = Vec::new();
     let mut snrs = Vec::new();
+    let mut llrs = Vec::new();
     // Başlık başına frekans tahmini gürültülü; ortak kayma için ortancayı kullan.
     let mut ws: Vec<f32> = hits.iter().map(|h| h.freq_rad_per_symbol).collect();
     ws.sort_by(f32::total_cmp);
@@ -214,10 +218,11 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) {
             })
             .collect();
         snrs.push((h.position, out.snr_db, parts));
+        llrs.push((h.pls, out.llr));
     }
     if snrs.is_empty() {
         println!("Gövdesi çözülebilecek pilotsuz QPSK çerçevesi yok.");
-        return;
+        return llrs;
     }
     println!();
     println!("Gövde çözümü (karıştırma çözümü + taşıyıcı takibi + QPSK demap):");
@@ -228,6 +233,78 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) {
     let mean = snrs.iter().map(|s| s.1).sum::<f32>() / snrs.len() as f32;
     let worst = snrs.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
     println!("  {} çerçeve, ortalama gövde SNR'ı {mean:.1} dB, en kötü {worst:.1} dB", snrs.len());
+    llrs
+}
+
+/// LDPC ve BCH ile hata düzeltme, BBFRAME'den MPEG-TS çıkarma; TS'yi `ts_path`e yazar.
+fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path) -> Result<(), String> {
+    let Some((pls, _)) = frames.first() else { return Ok(()) };
+    let (_, rate) = pls.modulation_and_rate().ok_or("bilinmeyen MODCOD")?;
+    let params = FecParams::new(rate, pls.short_frame).ok_or("bu FEC oranı desteklenmiyor")?;
+    let code = params.ldpc();
+    let bch = params.bch();
+
+    let mut depacketizer = TsDepacketizer::default();
+    let mut ts = Vec::new();
+    let (mut converged, mut bch_ok, mut header_ok, mut iterations) = (0, 0, 0, 0);
+    let mut first_header = None;
+    for (frame_pls, llr) in frames {
+        if frame_pls != pls {
+            continue;
+        }
+        let decoded = code.decode(llr, LDPC_MAX_ITERATIONS);
+        iterations += decoded.iterations;
+        if !decoded.converged {
+            continue;
+        }
+        converged += 1;
+        if bch.is_codeword(&decoded.bits[..params.k_ldpc]) {
+            bch_ok += 1;
+        }
+        let mut bytes: Vec<u8> = decoded.bits[..params.k_bch]
+            .chunks(8)
+            .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b))
+            .collect();
+        bbframe::bb_descramble(&mut bytes);
+        if let Some(h) = depacketizer.push(&bytes, &mut ts) {
+            header_ok += 1;
+            first_header.get_or_insert(h);
+        }
+    }
+    let n = frames.len();
+    println!();
+    println!("Hata düzeltme ({}):", pls.describe());
+    println!("  LDPC: {converged}/{n} çerçeve yakınsadı, ortalama {:.1} iterasyon", iterations as f64 / n as f64);
+    println!("  BCH: {bch_ok}/{converged} çerçeve geçerli");
+    println!("  BBHEADER: {header_ok}/{converged} çerçevede CRC doğru");
+    if let Some(h) = &first_header {
+        println!(
+            "  MATYPE 0x{:04X}, UPL {} bit, DFL {} bit, SYNC 0x{:02X}",
+            h.matype, h.upl, h.dfl, h.sync
+        );
+    }
+    println!(
+        "  MPEG-TS: {} paket, {} paket CRC hatası",
+        depacketizer.packets, depacketizer.crc_errors
+    );
+    if ts.is_empty() {
+        return Ok(());
+    }
+    std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
+    println!("  TS dosyası: {}", ts_path.display());
+
+    let mut pids: Vec<(u16, usize)> = Vec::new();
+    for p in ts.chunks_exact(188) {
+        let pid = (((p[1] & 0x1F) as u16) << 8) | p[2] as u16;
+        match pids.iter_mut().find(|(q, _)| *q == pid) {
+            Some((_, c)) => *c += 1,
+            None => pids.push((pid, 1)),
+        }
+    }
+    pids.sort();
+    let list: Vec<String> = pids.iter().map(|(p, c)| format!("0x{p:04X}×{c}")).collect();
+    println!("  PID'ler: {}", list.join(", "));
+    Ok(())
 }
 
 fn nearest_rolloff(r: f32) -> f64 {
