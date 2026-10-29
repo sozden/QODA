@@ -299,7 +299,7 @@ impl Receiver {
                 if std::env::var_os("QODA_DEBUG").is_some() {
                     let b = self.search.best(window, self.freq);
                     eprintln!(
-                        "başlık doğrulanamadı: çerçeve {} en iyi {:?}",
+                        "header not verified: frame {} best {:?}",
                         self.stats.frames_ok + self.stats.frames_failed,
                         b.map(|h| (h.position, h.sof_metric, h.pls_margin, h.pls))
                     );

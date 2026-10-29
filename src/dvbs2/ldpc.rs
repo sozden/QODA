@@ -37,8 +37,8 @@ impl LdpcCode {
     /// `group`: grup boyutu (DVB-S2'de 360; testlerde küçük değerler kullanılabilir).
     pub fn from_table(n: usize, k: usize, group: usize, rows: &[&[u16]]) -> Self {
         let m = n - k;
-        assert_eq!(k % group, 0, "k grup boyutunun katı olmalı");
-        assert_eq!(rows.len(), k / group, "tablo satır sayısı k / grup olmalı");
+        assert_eq!(k % group, 0, "k must be a multiple of the group size");
+        assert_eq!(rows.len(), k / group, "the table must have k / group rows");
         let q = m / group;
         let mut per_check: Vec<Vec<u32>> = vec![Vec::new(); m];
         for (r, row) in rows.iter().enumerate() {

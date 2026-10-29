@@ -3,7 +3,7 @@ name = "qoda"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-description = "QO-100 DATV yayınları için SDR alıcı ve DVB-S2 çözücü"
+description = "SDR receiver and DVB-S2 decoder for QO-100 DATV broadcasts"
 
 [dependencies]
 eframe = "0.35.0"

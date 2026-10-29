@@ -1,6 +1,6 @@
 //! Bir SigMF kaydında DVB-S2 çerçeve başlıklarını arar ve sinyalleşmeyi raporlar.
 //!
-//! Kullanım: qoda-analyze <kayıt> [--seconds S] [--rs kS/s] [--rolloff R]
+//! Kullanım: qoda-analyze <kayıt> [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -35,7 +35,7 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, rolloff: None, stream: false, noise_db: None };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
-        v.ok_or(format!("{flag} için değer eksik"))?.parse().map_err(|e| format!("{flag}: {e}"))
+        v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -44,12 +44,12 @@ fn parse_args() -> Result<Args, String> {
             "--rolloff" => args.rolloff = Some(num(it.next(), &a)?),
             "--stream" => args.stream = true,
             "--noise" => args.noise_db = Some(num(it.next(), &a)?),
-            _ if a.starts_with("--") => return Err(format!("bilinmeyen seçenek: {a}")),
+            _ if a.starts_with("--") => return Err(format!("unknown option: {a}")),
             _ => args.path = PathBuf::from(a),
         }
     }
     if args.path.as_os_str().is_empty() {
-        return Err("kullanım: qoda-analyze <kayıt> [--seconds S] [--rs kS/s] [--rolloff R]".into());
+        return Err("usage: qoda-analyze <recording> [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]".into());
     }
     Ok(args)
 }
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("hata: {e}");
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }
@@ -75,10 +75,10 @@ fn run() -> Result<(), String> {
     }
     if let Some(db) = args.noise_db {
         add_noise(&mut x, db);
-        println!("Sınama: kayda ortalama gücün {db:+.1} dB'i kadar beyaz gürültü eklendi.");
+        println!("Test: added white noise at {db:+.1} dB relative to the average power.");
     }
     println!(
-        "Kayıt: {} örnek, {:.3} MS/s, {:.2} s, RF {:.3} MHz",
+        "Recording: {} samples, {:.3} MS/s, {:.2} s, RF {:.3} MHz",
         x.len(),
         fs / 1e6,
         x.len() as f64 / fs,
@@ -88,11 +88,11 @@ fn run() -> Result<(), String> {
     // 1. Spektrumdan yayının merkezini ve sembol hızını bul.
     let mut spectrum = Spectrum::new(4096);
     let db = spectrum.compute(&x[..x.len().min(fs as usize)]);
-    let found = detect::detect(&db, fs, db.len() / 2).ok_or("kaydın ortasında yayın bulunamadı")?;
+    let found = detect::detect(&db, fs, db.len() / 2).ok_or("no broadcast found at the center of the recording")?;
     let rs = args.symbol_rate.unwrap_or(found.symbol_rate());
     let rolloff = args.rolloff.unwrap_or(nearest_rolloff(found.rolloff));
     println!(
-        "Spektrum: merkez ofseti {:+.1} kHz, ölçülen {:.1} kS/s → {:.1} kS/s, roll-off {rolloff:.2}, SNR {:.1} dB",
+        "Spectrum: center offset {:+.1} kHz, measured {:.1} kS/s -> {:.1} kS/s, roll-off {rolloff:.2}, SNR {:.1} dB",
         found.center_offset_hz / 1e3,
         found.measured_symbol_rate / 1e3,
         rs / 1e3,
@@ -111,7 +111,7 @@ fn run() -> Result<(), String> {
     let t = timing::recover(&y, sps, TIMING_BANDWIDTH);
     let clock_ppm = (t.final_period / sps - 1.0) * 1e6;
     println!(
-        "Zamanlama: {} sembol, {:.3} örnek/sembol, saat farkı {clock_ppm:+.0} ppm",
+        "Timing: {} symbols, {:.3} samples/symbol, clock offset {clock_ppm:+.0} ppm",
         t.symbols.len(),
         sps
     );
@@ -120,15 +120,15 @@ fn run() -> Result<(), String> {
     let mut symbols = t.symbols;
     let mut hits = plheader::find_headers(&symbols, SOF_THRESHOLD);
     if hits.is_empty() {
-        println!("Başlık bulunamadı, spektrum ters çevrilerek tekrar deneniyor...");
+        println!("No header found, retrying with the spectrum inverted...");
         symbols.iter_mut().for_each(|z| *z = z.conj());
         hits = plheader::find_headers(&symbols, SOF_THRESHOLD);
         if !hits.is_empty() {
-            println!("Spektrum ters (IQ yer değiştirmiş).");
+            println!("Spectrum is inverted (I/Q swapped).");
         }
     }
     if hits.is_empty() {
-        return Err("DVB-S2 çerçeve başlığı bulunamadı".into());
+        return Err("no DVB-S2 frame header found".into());
     }
 
     // İkinci geçiş: güvenilir başlıkların ortanca frekans kaymasını tüm sembollerden çıkar.
@@ -140,16 +140,16 @@ fn run() -> Result<(), String> {
         *z *= Complex::from_polar(1.0, -phase as f32);
     }
     let residual_hz = residual_w as f64 * rs / (2.0 * std::f64::consts::PI);
-    println!("Kalan frekans kayması {:+.2} kHz düzeltildi, başlıklar yeniden aranıyor.", residual_hz / 1e3);
+    println!("Corrected a residual frequency offset of {:+.2} kHz, searching headers again.", residual_hz / 1e3);
     let all = plheader::find_headers(&symbols, SOF_THRESHOLD);
     let rejected = all.iter().filter(|h| h.pls_margin < MIN_PLS_MARGIN).count();
     hits = all.into_iter().filter(|h| h.pls_margin >= MIN_PLS_MARGIN).collect();
     if rejected > 0 {
-        println!("PLS güveni düşük {rejected} aday yanlış alarm sayılıp atıldı.");
+        println!("Discarded {rejected} candidates with low PLS confidence as false alarms.");
     }
 
     println!();
-    println!("{:>9} {:>6} {:>6} {:>7} {:>9}  {:>9} {:>9}  sinyalleşme", "konum", "SOF", "PLS", "SNR dB", "Δf kHz", "aralık", "beklenen");
+    println!("{:>9} {:>6} {:>6} {:>7} {:>9}  {:>9} {:>9}  signalling", "position", "SOF", "PLS", "SNR dB", "Δf kHz", "gap", "expected");
     let mut consistent = 0;
     for (i, h) in hits.iter().enumerate() {
         let gap = hits.get(i + 1).map(|n| n.position - h.position);
@@ -185,12 +185,12 @@ fn run() -> Result<(), String> {
             / (2.0 * std::f64::consts::PI);
     let mean_snr = hits.iter().map(|h| h.snr_db as f64).sum::<f64>() / hits.len() as f64;
     println!();
-    println!("Özet: {} başlık bulundu, ardışık {} aralık beklenen çerçeve uzunluğuyla tutarlı.", hits.len(), consistent);
+    println!("Summary: {} headers found, {} consecutive gaps match the expected frame length.", hits.len(), consistent);
     for (pls, c) in &counts {
         println!("  {c:>4} × {}", pls.describe());
     }
     println!(
-        "  Spektrum merkezine göre frekans kayması {:+.2} kHz, ortalama başlık SNR'ı {mean_snr:.1} dB",
+        "  Frequency offset from the spectral center {:+.2} kHz, average header SNR {mean_snr:.1} dB",
         mean_df / 1e3
     );
 
@@ -235,26 +235,26 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         llrs.push((h.pls, out.llr));
     }
     if snrs.is_empty() {
-        println!("Gövdesi çözülebilecek QPSK çerçevesi yok.");
+        println!("No QPSK frames whose body can be decoded.");
         return llrs;
     }
     println!();
-    println!("Gövde çözümü (karıştırma çözümü + taşıyıcı takibi + QPSK demap):");
-    println!("{:>9} {:>8}   çeyreklerde SNR dB", "konum", "SNR dB");
+    println!("Frame body (descrambling + carrier tracking + QPSK demap):");
+    println!("{:>9} {:>8}   SNR dB per quarter", "position", "SNR dB");
     for (pos, snr, parts) in snrs.iter().take(8) {
         println!("{pos:>9} {snr:>8.1}   {:.1} {:.1} {:.1} {:.1}", parts[0], parts[1], parts[2], parts[3]);
     }
     let mean = snrs.iter().map(|s| s.1).sum::<f32>() / snrs.len() as f32;
     let worst = snrs.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
-    println!("  {} çerçeve, ortalama gövde SNR'ı {mean:.1} dB, en kötü {worst:.1} dB", snrs.len());
+    println!("  {} frames, average body SNR {mean:.1} dB, worst {worst:.1} dB", snrs.len());
     llrs
 }
 
 /// LDPC ve BCH ile hata düzeltme, BBFRAME'den MPEG-TS çıkarma; TS'yi `ts_path`e yazar.
 fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path) -> Result<(), String> {
     let Some((pls, _)) = frames.first() else { return Ok(()) };
-    let (_, rate) = pls.modulation_and_rate().ok_or("bilinmeyen MODCOD")?;
-    let params = FecParams::new(rate, pls.short_frame).ok_or("bu FEC oranı desteklenmiyor")?;
+    let (_, rate) = pls.modulation_and_rate().ok_or("unknown MODCOD")?;
+    let params = FecParams::new(rate, pls.short_frame).ok_or("this FEC rate is not supported")?;
     let code = params.ldpc();
     let bch = params.bch();
 
@@ -287,10 +287,10 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
     }
     let n = frames.len();
     println!();
-    println!("Hata düzeltme ({}):", pls.describe());
-    println!("  LDPC: {converged}/{n} çerçeve yakınsadı, ortalama {:.1} iterasyon", iterations as f64 / n as f64);
-    println!("  BCH: {bch_ok}/{converged} çerçeve geçerli");
-    println!("  BBHEADER: {header_ok}/{converged} çerçevede CRC doğru");
+    println!("Error correction ({}):", pls.describe());
+    println!("  LDPC: {converged}/{n} frames converged, {:.1} iterations on average", iterations as f64 / n as f64);
+    println!("  BCH: {bch_ok}/{converged} frames valid");
+    println!("  BBHEADER: CRC correct in {header_ok}/{converged} frames");
     if let Some(h) = &first_header {
         println!(
             "  MATYPE 0x{:04X}, UPL {} bit, DFL {} bit, SYNC 0x{:02X}",
@@ -298,14 +298,14 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
         );
     }
     println!(
-        "  MPEG-TS: {} paket, {} paket CRC hatası",
+        "  MPEG-TS: {} packets, {} packet CRC errors",
         depacketizer.packets, depacketizer.crc_errors
     );
     if ts.is_empty() {
         return Ok(());
     }
     std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
-    println!("  TS dosyası: {}", ts_path.display());
+    println!("  TS file: {}", ts_path.display());
     let mut info = qoda::tsinfo::TsInfo::default();
     info.push(&ts);
     print_service(info.info());
@@ -338,14 +338,14 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
     pids.sort();
     let list: Vec<String> = pids
         .iter()
-        .map(|(p, c, g)| if *g > 0 { format!("0x{p:04X}×{c} ({g} CC kopukluğu)") } else { format!("0x{p:04X}×{c}") })
+        .map(|(p, c, g)| if *g > 0 { format!("0x{p:04X}×{c} ({g} continuity errors)") } else { format!("0x{p:04X}×{c}") })
         .collect();
-    println!("  PID'ler: {}", list.join(", "));
+    println!("  PIDs: {}", list.join(", "));
     let gaps: usize = pids.iter().map(|(_, _, g)| g).sum();
     if gaps > 0 {
         println!(
-            "  Not: BBFRAME'lerin tamamı BCH/CRC denetiminden geçtiği için CC kopuklukları
-        yayının kendisindeki eksik paketleri gösterir."
+            "  Note: every BBFRAME passed the BCH/CRC checks, so continuity errors mean
+        packets are missing in the broadcast itself."
         );
     }
     Ok(())
@@ -364,16 +364,16 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     let elapsed = started.elapsed().as_secs_f64();
     let duration = x.len() as f64 / fs;
     println!(
-        "Akış hızı: {duration:.1} s kayıt {elapsed:.2} s'de işlendi ({:.1}× gerçek zaman)",
+        "Streaming speed: {duration:.1} s of recording processed in {elapsed:.2} s ({:.1}× real time)",
         duration / elapsed
     );
     let s = &rx.stats;
     println!(
-        "Akış alıcısı: kilit={}, {} çerçeve çözüldü, {} başarısız, {} BCH hatası, {} desteklenmeyen",
+        "Streaming receiver: locked={}, {} frames decoded, {} failed, {} BCH errors, {} unsupported",
         s.locked, s.frames_ok, s.frames_failed, s.bch_errors, s.frames_unsupported
     );
     println!(
-        "  SNR {:.1} dB, taşıyıcı kayması {:+.2} kHz, {} TS paketi, {} CRC hatası",
+        "  SNR {:.1} dB, carrier offset {:+.2} kHz, {} TS packets, {} CRC errors",
         s.snr_db,
         s.carrier_offset_hz / 1e3,
         s.ts_packets,
@@ -384,7 +384,7 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     }
     print_service(&s.service);
     std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
-    println!("  TS dosyası: {}", ts_path.display());
+    println!("  TS file: {}", ts_path.display());
     Ok(())
 }
 
@@ -413,7 +413,7 @@ fn print_service(s: &qoda::tsinfo::ServiceInfo) {
         return;
     }
     println!(
-        "  Servis: {} · sağlayıcı: {} · {}",
+        "  Service: {} · provider: {} · {}",
         s.name.as_deref().unwrap_or("?"),
         s.provider.as_deref().unwrap_or("?"),
         s.stream_list()
@@ -421,8 +421,8 @@ fn print_service(s: &qoda::tsinfo::ServiceInfo) {
             .map(|(codec, kind)| {
                 let kind = match kind {
                     qoda::tsinfo::StreamKind::Video => "video",
-                    qoda::tsinfo::StreamKind::Audio => "ses",
-                    qoda::tsinfo::StreamKind::Data => "veri",
+                    qoda::tsinfo::StreamKind::Audio => "audio",
+                    qoda::tsinfo::StreamKind::Data => "data",
                 };
                 format!("{codec} {kind}")
             })

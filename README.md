@@ -1,39 +1,83 @@
-<p align="center"><img src="assets/qoda-logo.svg" width="128" alt="QODA logosu"></p>
+<p align="center"><img src="assets/qoda-logo.svg" width="128" alt="QODA logo"></p>
 
 # QODA
 
-QO-100 uydusundaki DATV (DVB-S2) yayınlarını SDR alıcılarla izlemek için Rust ile yazılmış açık kaynak bir uygulama.
+**QODA** is an open-source receiver for the DATV (DVB-S2) broadcasts on the QO-100 satellite, written in Rust. It shows the spectrum, finds the broadcasts in it, decodes the selected one and plays the video, using common SDR receivers.
 
-QODA, QO-100 ve DATV'den esinlenmiştir.
+The name comes from **QO**-100 and **DA**TV.
 
-## Durum
+[Türkçe](README.tr.md)
 
-Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR cihazlarını SoapySDR üzerinden açıp spektrumu göstermek.
+## Features
 
-## Kullanım
+- Works with common SDR receivers through SoapySDR (tested with RTL-SDR; HackRF and Pluto/LibreSDR are expected to work)
+- Enter the LNB local oscillator and the broadcast frequency; the intermediate frequency is computed and the receiver is tuned automatically
+- Live spectrum and waterfall, with a strip of the broadcasts found in the visible band
+- Easy tuning: scroll or click individual frequency digits, scroll to move the selection, drag the spectrum to move the receiver
+- Automatic detection of the symbol rate, bandwidth and roll-off of a broadcast from the spectrum
+- A DVB-S2 decoder written from scratch in Rust, based on ETSI EN 302 307-1: frame sync, carrier and timing recovery, MODCOD (modulation and FEC) read from the frame header, parallel LDPC and BCH decoding, MPEG-TS output
+- Video shown inside the program, with audio
+- Service name, provider and stream types read from the DVB tables
+- Raw IQ recording in SigMF format, and a command-line tool to decode recordings
+- English and Turkish user interface
 
-1. Windows'ta [PothosSDR](https://downloads.myriadrf.org/builds/PothosSDR/) kurun ve `bin` klasörünü PATH'e ekleyin (SoapySDR ve RTL-SDR sürücüsü bununla gelir).
-   PothosSDR 2021 ile gelen eski `rtlsdr.dll` akış durdurulurken çökebiliyor. [RTL-SDR Blog sürümlerinden](https://github.com/rtlsdrblog/rtl-sdr-blog/releases) `x64` klasöründeki `rtlsdr.dll`, `pthreadVC2.dll` ve `msvcr100.dll` dosyalarını `qoda.exe`'nin yanına koyun.
-2. `cargo run --release` ile QODA'yı başlatın.
-3. Cihazı seçip **Başlat**'a basın. LNB LO ve merkez RF frekansını girin; IF otomatik hesaplanır.
-4. Spektrumda bir yayına **tıklayın** (seçer) ya da **çift tıklayın** (seçer ve alıcıyı oraya ortalar). Sembol hızı ve roll-off'a göre kaplanan bant mavi olarak gösterilir.
-   Frekans göstergelerinde (YAYIN, Merkez RF) farenin altındaki rakam tekerlekle değişir; rakamın üst yarısına tıklamak artırır, alt yarısı azaltır. Spektrumda tekerlek seçili yayını 10 kHz (Shift ile 100 kHz) kaydırır, sürüklemek alıcıyı kaydırır. Spektrumun üstündeki **Yayınlar** şeridinde görünen bandda bulunan yayınlar listelenir; tıklayınca o yayına geçilir.
-5. **▶ İzle** seçili yayını canlı olarak DVB-S2 çözer; video programın içinde, spektrumun üstünde gösterilir, ses ayrıca çalınır. Kilit durumu, MODCOD, SNR ve çerçeve sayaçları İzleme kartında görünür. Video ve ses için [FFmpeg](https://ffmpeg.org/) kurulu olmalıdır (ör. `winget install Gyan.FFmpeg`).
-6. **⏺ Kaydet** ham IQ'yu SigMF olarak kaydeder; kayıtlar `qoda-analyze <kayıt>` ile çözülebilir.
+Currently QPSK broadcasts are supported (with or without pilots, normal or short frames). 8PSK/APSK modulations and BCH error correction are next.
 
-## Planlanan özellikler
+## Requirements
 
-- Yaygın SDR cihazlarını tanıma (SoapySDR)
-- LNB LO ve yayın frekansından IF hesabı ve otomatik ayar
-- Spektrum ve şelale görünümü, tıklayarak frekans seçimi
-- Yayın üzerindeki sembol hızı, bant genişliği ve FEC'in otomatik tespiti
-- DVB tablolarından servis adı, sağlayıcı ve video/ses türü
-- Sıfırdan Rust ile yazılmış DVB-S2 çözücü (ETSI EN 302 307 standardı temel alınır): şu an QPSK (pilotlu/pilotsuz, normal/kısa çerçeve); 8PSK/APSK ve BCH hata düzeltme sırada
+- A dish pointed at QO-100, an LNB (horizontal polarisation, 18 V) and an SDR receiver. QO-100 DATV broadcasts are usually 1.5 MS/s or less, so even an RTL-SDR is enough.
+- [SoapySDR](https://github.com/pothosware/SoapySDR) and the driver module for your receiver. On Windows the easiest way is [PothosSDR](https://downloads.myriadrf.org/builds/PothosSDR/); add its `bin` folder to `PATH`.
+- [FFmpeg](https://ffmpeg.org/) for video and audio (`ffmpeg` and `ffplay` in `PATH`). On Windows: `winget install Gyan.FFmpeg`.
 
-## Lisans
+**Note for RTL-SDR on Windows:** the old `rtlsdr.dll` that comes with PothosSDR 2021 can crash when the stream is stopped. Copy `rtlsdr.dll`, `pthreadVC2.dll` and `msvcr100.dll` from the `x64` folder of a [RTL-SDR Blog release](https://github.com/rtlsdrblog/rtl-sdr-blog/releases) next to `qoda.exe`.
 
-GPL-3.0-or-later. Ayrıntılar için [LICENSE](LICENSE) dosyasına bakın.
+## Building
 
-## Katkıda bulunanlar
+```bash
+cargo build --release
+```
 
-Bu proje, "yAtölye" (yeniden atölye) çalışma grubu tarafından geliştirilmektedir.
+The program is `target/release/qoda`, the command-line tool is `target/release/qoda-analyze`.
+
+## Usage
+
+1. Select the device and press **Start receiver**.
+2. Enter the **LNB LO** (e.g. 9750 MHz) and the **Center RF** frequency; the IF is shown below them.
+3. Click a broadcast in the spectrum, or pick one from the **Signals** strip above it. Its symbol rate and roll-off are detected and the occupied band is highlighted. Double-click centers the receiver on it.
+4. Press **▶ Watch**. The broadcast is decoded live; the video appears above the spectrum and the **Watch** card shows the lock state, MODCOD, SNR, frame counters and the service name.
+
+Tuning:
+
+- In the frequency displays, scroll over a digit to change that digit; clicking its upper half increases it, the lower half decreases it.
+- In the spectrum, the mouse wheel moves the selection by 10 kHz (100 kHz with Shift); dragging moves the receiver.
+- While watching, the decoder restarts with the new settings half a second after you stop changing them.
+
+The interface language can be changed from the selector at the top right. The language and the LNB LO are saved in `%APPDATA%\QODA\settings.txt` (on Linux `~/.config/qoda/settings.txt`).
+
+### Recordings
+
+**Record IQ** saves the raw samples as SigMF (`.sigmf-data` and `.sigmf-meta`) in the `recordings` folder. A recording can be decoded offline:
+
+```bash
+qoda-analyze recordings/<name>
+```
+
+It prints the detected parameters, every frame header, the error-correction results and the service information, and writes the transport stream next to the recording as a `.ts` file. Options: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (decode with the same streaming receiver as the live view) and `--noise dB` (add white noise to test weak-signal reception).
+
+## How it works
+
+```
+SDR ─► frequency shift ─► RRC matched filter ─► Gardner timing ─► PL header sync (SOF + PLS)
+    ─► descrambling + carrier PLL ─► QPSK soft demap ─► LDPC (parallel) ─► BCH ─► BBFRAME ─► MPEG-TS
+    ─► ffmpeg (video) / ffplay (audio)
+```
+
+The LDPC tables and BCH polynomials were generated from the text of the standard with `tools/gen_ldpc_tables.py`; the PDF of the standard is not included in the repository.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+## Credits
+
+QODA is developed by the **yAtölye** (yeniden atölye) working group.

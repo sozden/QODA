@@ -100,12 +100,12 @@ impl Pls {
     }
 
     pub fn describe(&self) -> String {
-        let size = if self.short_frame { "kısa" } else { "normal" };
-        let pilots = if self.pilots { "pilotlu" } else { "pilotsuz" };
+        let size = if self.short_frame { "short" } else { "normal" };
+        let pilots = if self.pilots { "pilots" } else { "no pilots" };
         match (self.modcod, self.modulation_and_rate()) {
-            (0, _) => "dummy çerçeve".into(),
-            (_, Some((m, (n, d)))) => format!("{} {n}/{d}, {size} çerçeve, {pilots}", m.name()),
-            (mc, None) => format!("ayrılmış MODCOD {mc}"),
+            (0, _) => "dummy frame".into(),
+            (_, Some((m, (n, d)))) => format!("{} {n}/{d}, {size} frame, {pilots}", m.name()),
+            (mc, None) => format!("reserved MODCOD {mc}"),
         }
     }
 }

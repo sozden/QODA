@@ -18,9 +18,9 @@ pub fn read(path: &Path, max_samples: Option<usize>) -> io::Result<Recording> {
     let meta = std::fs::read_to_string(path.with_extension("sigmf-meta"))?;
     let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
     if !meta.contains("\"cf32_le\"") {
-        return Err(invalid("yalnızca cf32_le kayıtları destekleniyor"));
+        return Err(invalid("only cf32_le recordings are supported"));
     }
-    let sample_rate = number(&meta, "core:sample_rate").ok_or_else(|| invalid("core:sample_rate eksik"))?;
+    let sample_rate = number(&meta, "core:sample_rate").ok_or_else(|| invalid("core:sample_rate is missing"))?;
     let frequency = number(&meta, "core:frequency").unwrap_or(0.0);
 
     let bytes = std::fs::read(path.with_extension("sigmf-data"))?;
