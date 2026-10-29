@@ -1,0 +1,8 @@
+[package]
+name = "qoda"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "QO-100 DATV yayınları için SDR alıcı ve DVB-S2 çözücü"
+
+[dependencies]
