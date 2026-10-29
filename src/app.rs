@@ -15,6 +15,8 @@ const WATERFALL_ROWS: usize = 300;
 const SMOOTHING: f32 = 0.35;
 /// RTL-SDR için güvenli örnekleme hızları (MS/s).
 const SAMPLE_RATES: [f64; 4] = [1.024, 1.4, 2.048, 2.4];
+/// Kayıtların yazıldığı klasör (çalışma klasörüne göre).
+const RECORDINGS_DIR: &str = "recordings";
 const ROLLOFFS: [f32; 3] = [0.35, 0.25, 0.20];
 
 pub struct QodaApp {
@@ -35,6 +37,8 @@ pub struct QodaApp {
     gain_db: f64,
 
     detection: Option<Detection>,
+    /// Süren kaydın yolu ve yazılan örnek sayısı.
+    recording: Option<(std::path::PathBuf, u64)>,
 
     last_frame: Option<Frame>,
     smoothed: Vec<f32>,
@@ -70,6 +74,7 @@ impl QodaApp {
             auto_gain: false,
             gain_db: 30.0,
             detection: None,
+            recording: None,
             last_frame: None,
             smoothed: Vec::new(),
             range: (-100.0, -40.0),
@@ -109,6 +114,7 @@ impl QodaApp {
 
     fn stop(&mut self) {
         self.handle = None;
+        self.recording = None;
         self.status = "Durduruldu".into();
     }
 
@@ -124,12 +130,19 @@ impl QodaApp {
         while let Ok(ev) = h.events.try_recv() {
             match ev {
                 Event::Frame(f) => newest = Some(f),
+                Event::Recording { path, samples } => self.recording = Some((path, samples)),
+                Event::RecordingStopped => {
+                    if let Some((path, _)) = self.recording.take() {
+                        self.status = format!("Kayıt kaydedildi: {}", path.with_extension("sigmf-data").display());
+                    }
+                }
                 Event::Error(e) => error = Some(e),
             }
         }
         if let Some(e) = error {
             self.status = format!("Hata: {e}");
             self.handle = None;
+            self.recording = None;
         }
         if let Some(f) = newest {
             self.push_frame(f);
@@ -221,6 +234,32 @@ impl QodaApp {
         text
     }
 
+    fn toggle_recording(&mut self) {
+        if self.recording.is_some() {
+            self.send(Command::StopRecording);
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let name = format!(
+            "qoda_{:.3}MHz_{:.0}ksps_{stamp}",
+            self.center_mhz,
+            self.sample_rate_ms * 1e3
+        );
+        let path = std::path::Path::new(RECORDINGS_DIR).join(name);
+        self.send(Command::StartRecording { path, rf_hz: self.center_mhz * 1e6 });
+        // İlk olay gelene kadar düğme "kaydediyor" görünsün.
+        self.recording = Some((std::path::PathBuf::new(), 0));
+    }
+
+    fn recording_text(&self) -> Option<String> {
+        let (path, samples) = self.recording.as_ref()?;
+        let seconds = *samples as f64 / (self.sample_rate_ms * 1e6);
+        let mb = *samples as f64 * 8.0 / 1e6;
+        Some(format!("⏺ Kaydediliyor {seconds:.1} s, {mb:.0} MB · {}", path.display()))
+    }
+
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let running = self.handle.is_some();
@@ -244,6 +283,17 @@ impl QodaApp {
                 }
             } else if ui.add_enabled(!self.devices.is_empty(), egui::Button::new("▶ Başlat")).clicked() {
                 self.start(ui.ctx());
+            }
+
+            if running {
+                let label = if self.recording.is_some() { "⏹ Kaydı bitir" } else { "⏺ Kaydet" };
+                if ui
+                    .button(label)
+                    .on_hover_text("Ham IQ örneklerini SigMF olarak recordings klasörüne kaydet. Frekans veya örnekleme hızı değişince kayıt kapanır.")
+                    .clicked()
+                {
+                    self.toggle_recording();
+                }
             }
 
             ui.separator();
@@ -411,7 +461,10 @@ impl eframe::App for QodaApp {
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(&self.status);
+                match self.recording_text() {
+                    Some(t) => ui.colored_label(Color32::from_rgb(255, 90, 90), t),
+                    None => ui.label(&self.status),
+                };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("QODA · yAtölye");
                 });

@@ -3,6 +3,9 @@
 //! Arayüz komut gönderir (frekans, kazanç, örnekleme hızı); iş parçacığı
 //! örnekleri okur, spektrumu hesaplar ve olay olarak geri yollar.
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
@@ -50,6 +53,10 @@ pub enum Command {
     Tune(f64),
     Gain(Option<f64>),
     SampleRate(f64),
+    /// Ham IQ örneklerini SigMF olarak kaydetmeye başla. Yol uzantısızdır;
+    /// `.sigmf-data` ve `.sigmf-meta` dosyaları oluşturulur.
+    StartRecording { path: PathBuf, rf_hz: f64 },
+    StopRecording,
 }
 
 pub struct Frame {
@@ -60,7 +67,55 @@ pub struct Frame {
 
 pub enum Event {
     Frame(Frame),
+    /// Kayıt sürüyor; şimdiye kadar yazılan örnek sayısı.
+    Recording { path: PathBuf, samples: u64 },
+    RecordingStopped,
     Error(String),
+}
+
+/// Açık bir SigMF kaydı.
+struct Recording {
+    path: PathBuf,
+    data: BufWriter<File>,
+    samples: u64,
+}
+
+impl Recording {
+    fn start(path: PathBuf, sample_rate: f64, rf_hz: f64, if_hz: f64) -> std::io::Result<Self> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let meta = format!(
+            r#"{{
+  "global": {{
+    "core:datatype": "cf32_le",
+    "core:sample_rate": {sample_rate},
+    "core:version": "1.0.0",
+    "core:recorder": "QODA {version}",
+    "core:description": "QO-100 DATV IQ kaydı, LNB çıkışı IF {if_mhz:.6} MHz"
+  }},
+  "captures": [
+    {{ "core:sample_start": 0, "core:frequency": {rf_hz} }}
+  ],
+  "annotations": []
+}}
+"#,
+            version = env!("CARGO_PKG_VERSION"),
+            if_mhz = if_hz / 1e6,
+        );
+        std::fs::write(path.with_extension("sigmf-meta"), meta)?;
+        let data = BufWriter::new(File::create(path.with_extension("sigmf-data"))?);
+        Ok(Self { path, data, samples: 0 })
+    }
+
+    fn write(&mut self, samples: &[Complex<f32>]) -> std::io::Result<()> {
+        for s in samples {
+            self.data.write_all(&s.re.to_le_bytes())?;
+            self.data.write_all(&s.im.to_le_bytes())?;
+        }
+        self.samples += samples.len() as u64;
+        Ok(())
+    }
 }
 
 /// Çalışan iş parçacığına bağlantı. Düşürüldüğünde iş parçacığı durur.
@@ -107,6 +162,13 @@ fn run(
     let mut stream = dev.rx_stream::<Complex<f32>>(&[0])?;
     stream.activate(None)?;
     let mut spectrum = Spectrum::new(s.fft_size);
+    let mut recording: Option<Recording> = None;
+    let stop_recording = |rec: &mut Option<Recording>| {
+        if let Some(mut r) = rec.take() {
+            let _ = r.data.flush();
+            let _ = events.send(Event::RecordingStopped);
+        }
+    };
 
     loop {
         loop {
@@ -114,6 +176,8 @@ fn run(
                 Ok(Command::Tune(hz)) => {
                     s.if_hz = hz;
                     dev.set_frequency(Rx, 0, hz, ())?;
+                    // Kayıt meta verisi tek frekans içerir; frekans değişince kaydı kapat.
+                    stop_recording(&mut recording);
                 }
                 Ok(Command::Gain(g)) => {
                     s.gain = g;
@@ -121,10 +185,21 @@ fn run(
                 }
                 Ok(Command::SampleRate(rate)) => {
                     s.sample_rate = rate;
+                    stop_recording(&mut recording);
                     stream.deactivate(None)?;
                     dev.set_sample_rate(Rx, 0, rate)?;
                     stream.activate(None)?;
                 }
+                Ok(Command::StartRecording { path, rf_hz }) => {
+                    stop_recording(&mut recording);
+                    match Recording::start(path, s.sample_rate, rf_hz, s.if_hz) {
+                        Ok(r) => recording = Some(r),
+                        Err(e) => {
+                            let _ = events.send(Event::Error(format!("Kayıt açılamadı: {e}")));
+                        }
+                    }
+                }
+                Ok(Command::StopRecording) => stop_recording(&mut recording),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     stream.deactivate(None)?;
@@ -141,6 +216,18 @@ fn run(
                 Ok(n) => filled += n,
                 Err(e) if e.code == soapysdr::ErrorCode::Overflow => {}
                 Err(e) => return Err(e),
+            }
+        }
+
+        if let Some(r) = &mut recording {
+            match r.write(&samples) {
+                Ok(()) => {
+                    let _ = events.send(Event::Recording { path: r.path.clone(), samples: r.samples });
+                }
+                Err(e) => {
+                    recording = None;
+                    let _ = events.send(Event::Error(format!("Kayıt yazılamadı: {e}")));
+                }
             }
         }
 
