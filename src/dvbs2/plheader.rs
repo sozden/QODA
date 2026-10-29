@@ -171,6 +171,8 @@ pub struct HeaderSearch {
     reference: [Complex<f32>; HEADER_LEN],
     ref_diff: Vec<Complex<f32>>,
     codebook: Vec<(u8, [f32; 64])>,
+    /// Her PLS kodu için başlığın 89 ardışık sembol farkı (eşlenikli).
+    header_diffs: Vec<[Complex<f32>; HEADER_LEN - 1]>,
 }
 
 impl Default for HeaderSearch {
@@ -189,7 +191,13 @@ impl HeaderSearch {
                 (code, std::array::from_fn(|i| if (cw >> (63 - i)) & 1 == 0 { 1.0 } else { -1.0 }))
             })
             .collect();
-        Self { reference, ref_diff, codebook }
+        let header_diffs = (0u8..128)
+            .map(|code| {
+                let h = header_symbols(code);
+                std::array::from_fn(|i| (h[i + 1] * h[i].conj()).conj())
+            })
+            .collect();
+        Self { reference, ref_diff, codebook, header_diffs }
     }
 
     /// `p` konumunda başlayan SOF için normalize ilişki gücü ve ham ilişki.
@@ -238,7 +246,8 @@ impl HeaderSearch {
     }
 
     /// Penceredeki en güçlü SOF konumundaki başlığı çözer (kilitliyken doğrulama için).
-    pub fn best(&self, symbols: &[Complex<f32>]) -> Option<HeaderHit> {
+    /// `freq` verilirse başlıktan frekans tahmin edilmez, bu değer kullanılır.
+    pub fn best(&self, symbols: &[Complex<f32>], freq: Option<f32>) -> Option<HeaderHit> {
         if symbols.len() <= HEADER_LEN {
             return None;
         }
@@ -246,31 +255,38 @@ impl HeaderSearch {
         let pos = (0..symbols.len() - HEADER_LEN).max_by(|&a, &b| {
             self.metric(&diff, a).0.total_cmp(&self.metric(&diff, b).0)
         })?;
-        Some(self.decode_at(symbols, &diff, pos))
+        Some(self.decode(symbols, &diff, pos, freq))
     }
 
     fn decode_at(&self, symbols: &[Complex<f32>], diff: &[Complex<f32>], pos: usize) -> HeaderHit {
-        let (sof_metric, c) = self.metric(diff, pos);
+        self.decode(symbols, diff, pos, None)
+    }
+
+    fn decode(&self, symbols: &[Complex<f32>], diff: &[Complex<f32>], pos: usize, freq: Option<f32>) -> HeaderHit {
+        let (sof_metric, _) = self.metric(diff, pos);
         let header = &symbols[pos..pos + HEADER_LEN];
 
-        // İlk geçiş: frekansı SOF'tan tahmin edip PLS'i çöz. İkinci geçiş: çözülen
-        // kodla 90 sembolün tamamı bilinir; frekansı onlardan yeniden tahmin edip
-        // PLS kararını tekrarla.
-        let mut w = c.arg();
-        let mut known = SOF_LEN;
-        let mut ideal = self.reference;
-        let mut decision = (0u8, 0.0f32);
-        for _ in 0..2 {
-            let d = decode_pls(header, w, &ideal[..known], &self.codebook);
-            decision = d;
-            ideal = header_symbols(d.0);
-            known = HEADER_LEN;
-            let acc: Complex<f32> = (1..HEADER_LEN)
-                .map(|i| header[i] * header[i - 1].conj() * (ideal[i] * ideal[i - 1].conj()).conj())
-                .sum();
-            w = acc.arg();
-        }
-        let (code, pls_margin) = decision;
+        let w = match freq {
+            Some(w) => w,
+            None => {
+                // Kaba frekans: her PLS adayı için 89 sembol farkıyla ilişki; en güçlü
+                // aday seçilir. Bu ölçüt bir kodu tümleyeninden ayıramaz, o yüzden
+                // ince tahmin SOF ve PLS bölgelerinin kendi içindeki çiftlerle yapılır.
+                let hdiff = &diff[pos..pos + HEADER_LEN - 1];
+                let (code, acc) = self
+                    .header_diffs
+                    .iter()
+                    .enumerate()
+                    .map(|(c, r)| (c as u8, hdiff.iter().zip(r).map(|(d, r)| d * r).sum::<Complex<f32>>()))
+                    .max_by(|a, b| a.1.norm_sqr().total_cmp(&b.1.norm_sqr()))
+                    .unwrap();
+                refine_frequency(header, &header_symbols(code), acc.arg(), true)
+            }
+        };
+        let (code, pls_margin) = decode_pls(header, w, &self.reference[..SOF_LEN], &self.codebook);
+        let ideal = header_symbols(code);
+        // Kod belli olunca 90 sembolün tamamıyla frekansı bir kez daha incelt.
+        let w = if freq.is_some() { w } else { refine_frequency(header, &ideal, w, false) };
 
         // Bilinen 90 sembolle SNR: genlik ve hata gücü.
         let aligned = align(header, w, &ideal);
@@ -288,6 +304,30 @@ impl HeaderSearch {
             snr_db,
         }
     }
+}
+
+/// Modülasyonu `ideal` ile kaldırıp frekansı artan gecikmelerle (10, 40 sembol)
+/// inceltir: gecikme büyüdükçe tahmin hassaslaşır, her adımın belirsizlik sınırı
+/// bir öncekinin hatasından geniş kalır. `split` true ise SOF ve PLS bölgelerini
+/// aşan çiftler kullanılmaz (kodun tümleyeni henüz ayırt edilmemişse).
+fn refine_frequency(header: &[Complex<f32>], ideal: &[Complex<f32>; HEADER_LEN], w0: f32, split: bool) -> f32 {
+    let mut w = w0;
+    for lag in [10usize, 40] {
+        let y: Vec<Complex<f32>> = header
+            .iter()
+            .zip(ideal)
+            .enumerate()
+            .map(|(i, (z, h))| z * h.conj() * Complex::from_polar(1.0, -w * i as f32))
+            .collect();
+        let acc: Complex<f32> = (lag..HEADER_LEN)
+            .filter(|&i| !split || (i < SOF_LEN) == (i - lag < SOF_LEN))
+            .map(|i| y[i] * y[i - lag].conj())
+            .sum();
+        if acc.norm_sqr() > 0.0 {
+            w += acc.arg() / lag as f32;
+        }
+    }
+    w
 }
 
 /// Sembol dizisindeki tüm başlıkları arar; bkz. [`HeaderSearch::find_all`].

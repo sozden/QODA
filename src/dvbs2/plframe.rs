@@ -52,6 +52,8 @@ pub struct Demapped {
     pub llr: Vec<f32>,
     /// Karar yönlendirmeli faz hatasından ölçülen sembol SNR'ı (dB).
     pub snr_db: f32,
+    /// Gövde sonunda taşıyıcı döngüsünün frekans tahmini (radyan/sembol).
+    pub final_freq: f32,
 }
 
 /// Pilotlu çerçevelerde 16 yuvada (1440 veri sembolü) bir gelen pilot bloğunun uzunluğu.
@@ -106,7 +108,7 @@ pub fn demap_qpsk(
     // LLR ölçeği: 2·A·y/σ² ≈ y · 2√2 · SNR (birim genlikli QPSK, eksen başına).
     let scale = 2.0 * std::f32::consts::SQRT_2 * 10f32.powf(snr_db / 10.0);
     llr.iter_mut().for_each(|l| *l *= scale);
-    Demapped { llr, snr_db }
+    Demapped { llr, snr_db, final_freq: freq }
 }
 
 /// Başlığın ölçülen faz ve frekansından gövdenin ilk sembolündeki fazı hesaplar.

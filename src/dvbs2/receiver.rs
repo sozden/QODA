@@ -4,21 +4,27 @@
 //! PL başlık senkronu → karıştırma çözümü + taşıyıcı takibi + demap → LDPC → BCH →
 //! BBFRAME → TS. Senkron bulunduktan sonra her başlık beklenen konumda doğrulanır.
 
+use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
+use std::sync::mpsc::{self, Receiver as ChannelReceiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use num_complex::Complex;
 
 use super::bbframe::{self, TsDepacketizer};
 use super::fec::{Bch, FecParams};
 use super::filters;
-use super::ldpc::LdpcCode;
+use super::ldpc::{Decoded, LdpcCode};
 use super::plframe::{self, CarrierState};
 use super::plheader::{HEADER_LEN, HeaderHit, HeaderSearch, Modulation, Pls};
 use super::timing::TimingRecovery;
 
 const TIMING_BANDWIDTH: f64 = 0.005;
-const CARRIER_BANDWIDTH: f32 = 0.002;
+const CARRIER_BANDWIDTH: f32 = 0.005;
 const LDPC_MAX_ITERATIONS: usize = 50;
+/// LDPC çözümü için en fazla iş parçacığı.
+const MAX_LDPC_WORKERS: usize = 8;
 /// Kilitsizken başlık aramak için biriktirilen sembol sayısı (bir normal çerçeveden fazla).
 const SEARCH_WINDOW: usize = 40_000;
 /// Kilitliyken beklenen başlığın etrafında aranan sembol payı.
@@ -29,8 +35,8 @@ const MAX_MISSES: u32 = 3;
 const MIN_PLS_MARGIN: f32 = 0.3;
 /// Kilitliyken başlığın yerinde sayılması için en düşük SOF ilişkisi.
 const MIN_LOCKED_SOF: f32 = 0.8;
-/// Başlıklardan ölçülen frekansın üstel ortalama katsayısı.
-const FREQ_AVERAGING: f32 = 0.1;
+/// Başarılı çerçeve sonunda PLL frekansının ortak tahmine katılma oranı.
+const FREQ_TRACKING: f32 = 0.5;
 
 pub struct ReceiverConfig {
     pub sample_rate: f64,
@@ -69,6 +75,50 @@ struct FecState {
     bch: Bch,
 }
 
+/// LDPC iş parçacıklarına giden bir çerçeve.
+struct Job {
+    seq: u64,
+    fec: Arc<FecState>,
+    llr: Vec<f32>,
+    /// Gövde sonunda PLL'in frekans tahmini (radyan/sembol).
+    final_freq: f32,
+}
+
+struct Outcome {
+    seq: u64,
+    fec: Arc<FecState>,
+    decoded: Decoded,
+    final_freq: f32,
+}
+
+/// Çerçeveleri paralel çözen iş parçacıkları; sonuçlar sıra numarasıyla döner.
+fn spawn_ldpc_workers() -> (Sender<Job>, ChannelReceiver<Outcome>) {
+    let (job_tx, job_rx) = mpsc::channel::<Job>();
+    let (out_tx, out_rx) = mpsc::channel();
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let workers = thread::available_parallelism()
+        .map_or(2, |n| n.get().saturating_sub(2))
+        .clamp(1, MAX_LDPC_WORKERS);
+    for _ in 0..workers {
+        let job_rx = Arc::clone(&job_rx);
+        let out_tx = out_tx.clone();
+        thread::spawn(move || {
+            loop {
+                let job = match job_rx.lock().unwrap().recv() {
+                    Ok(job) => job,
+                    Err(_) => return,
+                };
+                let decoded = job.fec.ldpc.decode(&job.llr, LDPC_MAX_ITERATIONS);
+                let outcome = Outcome { seq: job.seq, fec: job.fec, decoded, final_freq: job.final_freq };
+                if out_tx.send(outcome).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    (job_tx, out_rx)
+}
+
 pub struct Receiver {
     cfg: ReceiverConfig,
     mix_phase: f64,
@@ -83,12 +133,19 @@ pub struct Receiver {
     expected: Option<usize>,
     last_frame_len: usize,
     misses: u32,
-    /// Başlıklardan ölçülen ortak frekans kaymasının ortalaması (radyan/sembol).
+    /// Ortak frekans kayması (radyan/sembol). İlk kilitte başlıktan, sonra başarıyla
+    /// çözülen her çerçevenin sonundaki PLL frekansından güncellenir.
     freq: Option<f32>,
-    fec: Option<FecState>,
+    fec: Option<Arc<FecState>>,
+    jobs: Sender<Job>,
+    outcomes: ChannelReceiver<Outcome>,
+    /// Gönderilen ve sırayla işlenen çerçeve sayıları; arada kalanlar `pending`'de bekler.
+    submitted: u64,
+    emitted: u64,
+    pending: BTreeMap<u64, Outcome>,
     scrambling: Vec<u8>,
     depacketizer: TsDepacketizer,
-    last_cc: std::collections::HashMap<u16, u8>,
+    last_cc: HashMap<u16, u8>,
     pub stats: ReceiverStats,
 }
 
@@ -96,6 +153,7 @@ impl Receiver {
     pub fn new(cfg: ReceiverConfig) -> Self {
         let sps = cfg.sample_rate / cfg.symbol_rate;
         let taps = filters::rrc_taps(sps, cfg.rolloff, 8);
+        let (jobs, outcomes) = spawn_ldpc_workers();
         Self {
             mix_phase: 0.0,
             mix_step: -TAU * cfg.offset_hz / cfg.sample_rate,
@@ -110,6 +168,11 @@ impl Receiver {
             misses: 0,
             freq: None,
             fec: None,
+            jobs,
+            outcomes,
+            submitted: 0,
+            emitted: 0,
+            pending: BTreeMap::new(),
             scrambling: Vec::new(),
             depacketizer: TsDepacketizer::default(),
             last_cc: Default::default(),
@@ -124,7 +187,31 @@ impl Receiver {
         let mut symbols = Vec::with_capacity(filtered.len());
         self.timing.process(&filtered, &mut symbols);
         self.symbols.extend_from_slice(&symbols);
-        self.frame_sync(ts);
+        self.frame_sync();
+        self.collect(ts, false);
+    }
+
+    /// Bekleyen tüm LDPC sonuçlarını bekleyip işler (kayıt sonunda).
+    pub fn finish(&mut self, ts: &mut Vec<u8>) {
+        self.collect(ts, true);
+    }
+
+    /// LDPC sonuçlarını alıp çerçeve sırasına göre işler.
+    fn collect(&mut self, ts: &mut Vec<u8>, wait: bool) {
+        while self.emitted < self.submitted {
+            let next = if wait { self.outcomes.recv().ok() } else { self.outcomes.try_recv().ok() };
+            let got = next.is_some();
+            if let Some(o) = next {
+                self.pending.insert(o.seq, o);
+            }
+            while let Some(o) = self.pending.remove(&self.emitted) {
+                self.emitted += 1;
+                self.finish_frame(o, ts);
+            }
+            if !got {
+                return;
+            }
+        }
     }
 
     /// Frekans kaydırma, RRC filtre ve AGC.
@@ -156,7 +243,7 @@ impl Receiver {
         out
     }
 
-    fn frame_sync(&mut self, ts: &mut Vec<u8>) {
+    fn frame_sync(&mut self) {
         loop {
             let Some(expected) = self.expected else {
                 if self.symbols.len() < SEARCH_WINDOW {
@@ -189,7 +276,9 @@ impl Receiver {
             // Kilitliyken SOF yerindeyse PLS güveni düşük olsa da çerçeve kabul edilir:
             // aynı sinyalleşme geldiyse olduğu gibi, belirsizse önceki sinyalleşmeyle.
             let last = self.stats.pls;
-            let hit = self.search.best(window).and_then(|mut h| {
+            // Frekans biliniyorsa başlıktan yeniden tahmin edilmez: tek başlığın
+            // tahmini düşük SNR'da PLL'in izlediği değerden çok daha gürültülüdür.
+            let hit = self.search.best(window, self.freq).and_then(|mut h| {
                 let confident = h.pls_margin >= MIN_PLS_MARGIN && h.pls.frame_len().is_some();
                 if confident || Some(h.pls) == last {
                     Some(h)
@@ -203,7 +292,7 @@ impl Receiver {
 
             let Some(mut hit) = hit else {
                 if std::env::var_os("QODA_DEBUG").is_some() {
-                    let b = self.search.best(window);
+                    let b = self.search.best(window, self.freq);
                     eprintln!(
                         "başlık doğrulanamadı: çerçeve {} en iyi {:?}",
                         self.stats.frames_ok + self.stats.frames_failed,
@@ -225,7 +314,7 @@ impl Receiver {
             if self.symbols.len() < hit.position + len {
                 return;
             }
-            self.decode_frame(&hit, ts);
+            self.decode_frame(&hit);
             self.misses = 0;
             self.last_frame_len = len;
             self.stats.locked = true;
@@ -257,19 +346,16 @@ impl Receiver {
         }
     }
 
-    fn decode_frame(&mut self, hit: &HeaderHit, ts: &mut Vec<u8>) {
+    /// Çerçeve gövdesini demap edip LDPC çözümü için iş parçacıklarına gönderir.
+    fn decode_frame(&mut self, hit: &HeaderHit) {
         let pls = hit.pls;
         if pls.modcod == 0 {
             return; // dummy çerçeve
         }
         let Some((modulation, rate)) = pls.modulation_and_rate() else { return };
 
-        // Tek başlığın frekans tahmini gürültülüdür; ortak kayma yavaşça ortalanır.
         let w = hit.freq_rad_per_symbol;
-        if hit.pls_margin > 0.5 {
-            self.freq = Some(self.freq.map_or(w, |f| f + FREQ_AVERAGING * (w - f)));
-        }
-        let freq = self.freq.unwrap_or(w);
+        let freq = *self.freq.get_or_insert(w);
         self.stats.carrier_offset_hz = freq as f64 * self.cfg.symbol_rate / TAU;
 
         if modulation != Modulation::Qpsk {
@@ -278,7 +364,7 @@ impl Receiver {
         }
         if self.fec.as_ref().is_none_or(|f| f.pls != pls) {
             let Some(params) = FecParams::new(rate, pls.short_frame) else { return };
-            self.fec = Some(FecState { pls, ldpc: params.ldpc(), bch: params.bch(), params });
+            self.fec = Some(Arc::new(FecState { pls, ldpc: params.ldpc(), bch: params.bch(), params }));
         }
 
         let start = hit.position + HEADER_LEN;
@@ -298,22 +384,28 @@ impl Receiver {
             plframe::demap_qpsk(body, &self.scrambling[..body_len], pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH);
         self.stats.snr_db = demapped.snr_db;
 
-        let fec = self.fec.as_ref().unwrap();
-        let decoded = fec.ldpc.decode(&demapped.llr, LDPC_MAX_ITERATIONS);
+        let job = Job {
+            seq: self.submitted,
+            fec: Arc::clone(self.fec.as_ref().unwrap()),
+            llr: demapped.llr,
+            final_freq: demapped.final_freq,
+        };
+        if self.jobs.send(job).is_ok() {
+            self.submitted += 1;
+        }
+    }
+
+    /// LDPC sonucu gelen çerçeveyi sırasıyla bitirir: BCH, BBFRAME, TS.
+    fn finish_frame(&mut self, o: Outcome, ts: &mut Vec<u8>) {
+        let Outcome { fec, decoded, final_freq, .. } = o;
         self.stats.ldpc_iterations = decoded.iterations;
         if !decoded.converged {
-            if std::env::var_os("QODA_DEBUG").is_some() {
-                eprintln!(
-                    "LDPC başarısız: çerçeve {} marj {:.2} w {:.4} ort {:.4} snr {:.1}",
-                    self.stats.frames_ok + self.stats.frames_failed,
-                    hit.pls_margin,
-                    w,
-                    freq,
-                    demapped.snr_db
-                );
-            }
             self.stats.frames_failed += 1;
             return;
+        }
+        // Çözülen çerçevede PLL doğru izlemiştir; sonundaki frekans en iyi tahmindir.
+        if let Some(f) = &mut self.freq {
+            *f += FREQ_TRACKING * (final_freq - *f);
         }
         self.stats.frames_ok += 1;
         if !fec.bch.is_codeword(&decoded.bits[..fec.params.k_ldpc]) {

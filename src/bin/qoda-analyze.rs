@@ -27,11 +27,13 @@ struct Args {
     rolloff: Option<f64>,
     /// Kaydı akış alıcısından parça parça geçir (canlı çözümü sınamak için).
     stream: bool,
+    /// Sınama için eklenen gürültünün, kaydın ortalama gücüne oranı (dB).
+    noise_db: Option<f64>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, rolloff: None, stream: false };
+    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, rolloff: None, stream: false, noise_db: None };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("{flag} için değer eksik"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
@@ -41,6 +43,7 @@ fn parse_args() -> Result<Args, String> {
             "--rs" => args.symbol_rate = Some(num(it.next(), &a)? * 1e3),
             "--rolloff" => args.rolloff = Some(num(it.next(), &a)?),
             "--stream" => args.stream = true,
+            "--noise" => args.noise_db = Some(num(it.next(), &a)?),
             _ if a.starts_with("--") => return Err(format!("bilinmeyen seçenek: {a}")),
             _ => args.path = PathBuf::from(a),
         }
@@ -69,6 +72,10 @@ fn run() -> Result<(), String> {
     let mut x = rec.samples;
     if let Some(s) = max.map(|_| args.seconds.unwrap()) {
         x.truncate((s * fs) as usize);
+    }
+    if let Some(db) = args.noise_db {
+        add_noise(&mut x, db);
+        println!("Sınama: kayda ortalama gücün {db:+.1} dB'i kadar beyaz gürültü eklendi.");
     }
     println!(
         "Kayıt: {} örnek, {:.3} MS/s, {:.2} s, RF {:.3} MHz",
@@ -350,6 +357,7 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     for chunk in x.chunks(16_384) {
         rx.process(chunk, &mut ts);
     }
+    rx.finish(&mut ts);
     let elapsed = started.elapsed().as_secs_f64();
     let duration = x.len() as f64 / fs;
     println!(
@@ -374,6 +382,26 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
     println!("  TS dosyası: {}", ts_path.display());
     Ok(())
+}
+
+/// Örneklere, ortalama güçlerine göre `db` seviyesinde karmaşık Gauss gürültüsü ekler.
+fn add_noise(x: &mut [Complex<f32>], db: f64) {
+    let power = x.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / x.len() as f64;
+    let sigma = (power * 10f64.powf(db / 10.0) / 2.0).sqrt();
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut uniform = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    };
+    for z in x.iter_mut() {
+        // Box-Muller
+        let (u1, u2) = (uniform(), uniform());
+        let r = (-2.0 * u1.ln()).sqrt() * sigma;
+        let th = std::f64::consts::TAU * u2;
+        *z += Complex::new((r * th.cos()) as f32, (r * th.sin()) as f32);
+    }
 }
 
 fn nearest_rolloff(r: f32) -> f64 {

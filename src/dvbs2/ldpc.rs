@@ -11,6 +11,10 @@
 pub const GROUP: usize = 360;
 /// Min-sum mesajlarının ölçek katsayısı.
 const NORMALIZATION: f32 = 0.8;
+/// Erken bırakma: bu kadar iterasyon geriye bakılır; sağlanmayan denetim sayısı
+/// o aralıkta yeterince azalmadıysa çerçeve çözülemez sayılır.
+const STALL_WINDOW: usize = 6;
+const STALL_IMPROVEMENT: f32 = 0.9;
 
 pub struct LdpcCode {
     pub n: usize,
@@ -83,6 +87,13 @@ impl LdpcCode {
         word
     }
 
+    /// Sağlanmayan eşlik denetimi sayısı.
+    fn unsatisfied(&self, bits: &[u8]) -> usize {
+        (0..self.n - self.k)
+            .filter(|&j| self.check(j).iter().fold(0u8, |a, &v| a ^ bits[v as usize]) != 0)
+            .count()
+    }
+
     /// Tüm eşlik denetimleri sağlanıyor mu.
     pub fn is_codeword(&self, bits: &[u8]) -> bool {
         (0..self.n - self.k).all(|j| self.check(j).iter().fold(0u8, |a, &v| a ^ bits[v as usize]) == 0)
@@ -95,6 +106,7 @@ impl LdpcCode {
         let mut messages = vec![0f32; self.edges.len()];
         let mut q = Vec::new();
         let mut bits = vec![0u8; self.n];
+        let mut history = Vec::with_capacity(max_iterations);
 
         for iteration in 1..=max_iterations {
             for j in 0..self.n - self.k {
@@ -127,9 +139,17 @@ impl LdpcCode {
             for (b, l) in bits.iter_mut().zip(&posterior) {
                 *b = (*l < 0.0) as u8;
             }
-            if self.is_codeword(&bits) {
+            let unsatisfied = self.unsatisfied(&bits);
+            if unsatisfied == 0 {
                 return Decoded { bits, iterations: iteration, converged: true };
             }
+            // İlerlemeyen çözme gerçek zamanı tüketir; umut yoksa bırak.
+            if iteration > STALL_WINDOW
+                && unsatisfied as f32 > STALL_IMPROVEMENT * history[iteration - 1 - STALL_WINDOW] as f32
+            {
+                return Decoded { bits, iterations: iteration, converged: false };
+            }
+            history.push(unsatisfied);
         }
         Decoded { bits, iterations: max_iterations, converged: false }
     }
