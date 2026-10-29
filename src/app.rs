@@ -5,6 +5,7 @@ use eframe::egui::{
     TextureOptions, Vec2, pos2,
 };
 
+use crate::detect::{self, Detection};
 use crate::sdr::{self, Command, DeviceInfo, Event, Frame, Settings};
 use crate::tuning;
 
@@ -32,6 +33,8 @@ pub struct QodaApp {
     sample_rate_ms: f64,
     auto_gain: bool,
     gain_db: f64,
+
+    detection: Option<Detection>,
 
     last_frame: Option<Frame>,
     smoothed: Vec<f32>,
@@ -66,6 +69,7 @@ impl QodaApp {
             sample_rate_ms: 2.048,
             auto_gain: false,
             gain_db: 30.0,
+            detection: None,
             last_frame: None,
             smoothed: Vec::new(),
             range: (-100.0, -40.0),
@@ -147,8 +151,12 @@ impl QodaApp {
         let floor = sorted[sorted.len() / 10] - 5.0;
         let top = sorted[sorted.len() - 1] + 5.0;
         let top = top.max(floor + 20.0);
-        self.range.0 += 0.1 * (floor - self.range.0);
-        self.range.1 += 0.1 * (top - self.range.1);
+        if self.last_frame.is_none() {
+            self.range = (floor, top);
+        } else {
+            self.range.0 += 0.1 * (floor - self.range.0);
+            self.range.1 += 0.1 * (top - self.range.1);
+        }
 
         // Şelaleyi bir satır aşağı kaydırıp en üste yeni satırı yaz.
         let w = self.waterfall.size[0];
@@ -162,6 +170,55 @@ impl QodaApp {
         }
 
         self.last_frame = Some(frame);
+    }
+
+    /// Son karenin RF merkezi ve genişliği (MHz).
+    fn frame_span(&self) -> (f64, f64) {
+        self.last_frame.as_ref().map_or((self.center_mhz, self.sample_rate_ms), |f| {
+            (f.if_hz / 1e6 + self.lo_mhz, f.sample_rate / 1e6)
+        })
+    }
+
+    /// `mhz` civarındaki yayını spektrumdan bulup yayın ayarlarını doldurur.
+    fn auto_detect(&mut self, mhz: f64) {
+        let (center, span) = self.frame_span();
+        let n = self.smoothed.len();
+        let pos = (mhz - center) / span + 0.5;
+        if n == 0 || !(0.0..1.0).contains(&pos) {
+            return;
+        }
+        let guess = (pos * n as f64) as usize;
+        self.detection = detect::detect(&self.smoothed, span * 1e6, guess);
+        match &self.detection {
+            Some(d) => {
+                self.selected_mhz = center + d.center_offset_hz / 1e6;
+                self.symbol_rate_ks = (d.symbol_rate() / 1e3) as f32;
+                self.rolloff = ROLLOFFS
+                    .iter()
+                    .copied()
+                    .min_by(|a, b| (a - d.rolloff).abs().total_cmp(&(b - d.rolloff).abs()))
+                    .unwrap_or(0.35);
+            }
+            None => self.status = format!("{mhz:.3} MHz civarında yayın bulunamadı"),
+        }
+    }
+
+    fn detection_text(&self) -> String {
+        let Some(d) = &self.detection else {
+            return "Yayın seçmek için spektruma tıklayın".into();
+        };
+        let mut text = format!(
+            "Bulunan: {:.1} kS/s ölçüldü",
+            d.measured_symbol_rate / 1e3
+        );
+        if let Some(r) = d.common_symbol_rate {
+            text += &format!(" (≈ {:.0} kS/s)", r / 1e3);
+        }
+        text += &format!(", roll-off ~{:.2}, SNR {:.1} dB", d.rolloff, d.snr_db);
+        if d.truncated {
+            text += " · yayın spektrum kenarına taşıyor, alıcıyı ortalayın";
+        }
+        text
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -243,7 +300,11 @@ impl QodaApp {
                     }
                 });
             ui.label(format!("Bant genişliği {:.0} kHz", self.occupied_khz()));
+            if ui.button("Otomatik bul").on_hover_text("Seçili frekanstaki yayının parametrelerini spektrumdan bul").clicked() {
+                self.auto_detect(self.selected_mhz);
+            }
         });
+        ui.label(self.detection_text());
     }
 
     fn occupied_khz(&self) -> f32 {
@@ -267,12 +328,8 @@ impl QodaApp {
         painter.rect_filled(spec_rect, 0.0, Color32::from_rgb(12, 16, 24));
         painter.image(tex.id(), wf_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
 
-        let span_mhz = self.last_frame.as_ref().map_or(self.sample_rate_ms, |f| f.sample_rate / 1e6);
         // Çizilen spektrum, karenin ayarlandığı merkeze göre konumlanır.
-        let frame_center = self
-            .last_frame
-            .as_ref()
-            .map_or(self.center_mhz, |f| f.if_hz / 1e6 + self.lo_mhz);
+        let (frame_center, span_mhz) = self.frame_span();
         let x_of = |mhz: f64| full.left() + ((mhz - frame_center) / span_mhz + 0.5) as f32 * full.width();
         let mhz_of = |x: f32| frame_center + ((x - full.left()) / full.width() - 0.5) as f64 * span_mhz;
 
@@ -334,9 +391,11 @@ impl QodaApp {
         if let Some(pos) = response.interact_pointer_pos() {
             if response.double_clicked() {
                 self.selected_mhz = mhz_of(pos.x);
+                self.auto_detect(self.selected_mhz);
                 self.retune(self.selected_mhz);
             } else if response.clicked() {
                 self.selected_mhz = mhz_of(pos.x);
+                self.auto_detect(self.selected_mhz);
             }
         }
     }
