@@ -306,6 +306,9 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
     }
     std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
     println!("  TS dosyası: {}", ts_path.display());
+    let mut info = qoda::tsinfo::TsInfo::default();
+    info.push(&ts);
+    print_service(info.info());
 
     // PID başına paket sayısı ve süreklilik sayacı (CC) kopuklukları.
     let mut pids: Vec<(u16, usize, usize)> = Vec::new();
@@ -379,6 +382,7 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     if let Some(p) = s.pls {
         println!("  {}", p.describe());
     }
+    print_service(&s.service);
     std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
     println!("  TS dosyası: {}", ts_path.display());
     Ok(())
@@ -402,6 +406,18 @@ fn add_noise(x: &mut [Complex<f32>], db: f64) {
         let th = std::f64::consts::TAU * u2;
         *z += Complex::new((r * th.cos()) as f32, (r * th.sin()) as f32);
     }
+}
+
+fn print_service(s: &qoda::tsinfo::ServiceInfo) {
+    if s.name.is_none() && s.streams.is_empty() {
+        return;
+    }
+    println!(
+        "  Servis: {} · sağlayıcı: {} · {}",
+        s.name.as_deref().unwrap_or("?"),
+        s.provider.as_deref().unwrap_or("?"),
+        s.describe_streams()
+    );
 }
 
 fn nearest_rolloff(r: f32) -> f64 {

@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/qoda-logo.svg" width="128" alt="QODA logosu"></p>
+
 # QODA
 
 QO-100 uydusundaki DATV (DVB-S2) yayınlarını SDR alıcılarla izlemek için Rust ile yazılmış açık kaynak bir uygulama.
@@ -24,6 +26,7 @@ Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR ci
 - LNB LO ve yayın frekansından IF hesabı ve otomatik ayar
 - Spektrum ve şelale görünümü, tıklayarak frekans seçimi
 - Yayın üzerindeki sembol hızı, bant genişliği ve FEC'in otomatik tespiti
+- DVB tablolarından servis adı, sağlayıcı ve video/ses türü
 - Sıfırdan Rust ile yazılmış DVB-S2 çözücü (ETSI EN 302 307 standardı temel alınır): şu an QPSK (pilotlu/pilotsuz, normal/kısa çerçeve); 8PSK/APSK ve BCH hata düzeltme sırada
 
 ## Lisans

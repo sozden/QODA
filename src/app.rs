@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 
 use crate::decoder::{self, Decoder, VIDEO_HEIGHT, VIDEO_WIDTH};
+use crate::logo;
 use crate::sdr::{self, Command, DeviceInfo, Event, Frame, Settings};
 use qoda::detect::{self, Detection};
 use qoda::dvbs2::receiver::ReceiverConfig;
@@ -21,6 +22,8 @@ const SAMPLE_RATES: [f64; 4] = [1.024, 1.4, 2.048, 2.4];
 /// Kayıtların yazıldığı klasör (çalışma klasörüne göre).
 const RECORDINGS_DIR: &str = "recordings";
 const ROLLOFFS: [f32; 3] = [0.35, 0.25, 0.20];
+/// Üst bardaki logo dokusunun piksel boyutu (yüksek DPI için çizim boyutunun katı).
+const LOGO_PIXELS: usize = 128;
 
 /// Renk paleti.
 mod palette {
@@ -72,11 +75,14 @@ pub struct QodaApp {
     range: (f32, f32),
     waterfall: ColorImage,
     waterfall_tex: Option<TextureHandle>,
+    logo_tex: TextureHandle,
 }
 
 impl QodaApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
+        let logo_image = ColorImage::from_rgba_unmultiplied([LOGO_PIXELS, LOGO_PIXELS], &logo::rgba(LOGO_PIXELS));
+        let logo_tex = cc.egui_ctx.load_texture("logo", logo_image, TextureOptions::LINEAR);
         let devices = sdr::list_devices();
         let device_index = devices
             .iter()
@@ -111,6 +117,7 @@ impl QodaApp {
             range: (-100.0, -40.0),
             waterfall: ColorImage::new([FFT_SIZE, WATERFALL_ROWS], vec![Color32::BLACK; FFT_SIZE * WATERFALL_ROWS]),
             waterfall_tex: None,
+            logo_tex,
         }
     }
 
@@ -323,12 +330,13 @@ impl QodaApp {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("QODA").size(24.0).strong().color(ACCENT));
+            ui.add(egui::Image::new(&self.logo_tex).fit_to_exact_size(vec2(44.0, 44.0)));
             ui.vertical(|ui| {
-                ui.add_space(2.0);
-                ui.label(RichText::new("QO-100 DATV Alıcı").size(13.0).color(TEXT));
-                ui.label(RichText::new("yAtölye").size(11.0).color(MUTED));
+                ui.label(RichText::new("QODA").size(24.0).strong().color(ACCENT));
+                ui.label(RichText::new("QO-100 DATV Alıcı").size(12.0).color(MUTED));
             });
+            ui.add_space(6.0);
+            yatolye_badge(ui);
             ui.add_space(24.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new("YAYIN").size(10.0).color(MUTED));
@@ -339,6 +347,18 @@ impl QodaApp {
                 ui.label(RichText::new("SEMBOL HIZI").size(10.0).color(MUTED));
                 ui.label(RichText::new(format!("{:.0} kS/s", self.symbol_rate_ks)).size(18.0).monospace().color(TEXT));
             });
+            if let Some((name, provider)) = self.service_title() {
+                ui.add_space(12.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("SERVİS").size(10.0).color(MUTED));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).size(18.0).strong().color(BAND));
+                        if let Some(p) = provider {
+                            ui.label(RichText::new(p).size(13.0).color(MUTED));
+                        }
+                    });
+                });
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let watching = self.decoder.is_some();
@@ -538,8 +558,20 @@ impl QodaApp {
         let s = &status.stats;
         let (lock_text, lock_color) = if s.locked { ("● Kilitli", GOOD) } else { ("● Senkron aranıyor", WARN) };
         ui.label(RichText::new(lock_text).strong().color(lock_color));
+        if let Some(name) = &s.service.name {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).size(16.0).strong().color(BAND));
+                if let Some(p) = &s.service.provider {
+                    ui.label(RichText::new(p).color(MUTED));
+                }
+            });
+        }
         if let Some(p) = s.pls {
             ui.label(RichText::new(p.describe()).color(TEXT));
+        }
+        let streams = s.service.describe_streams();
+        if !streams.is_empty() {
+            ui.label(RichText::new(streams).size(11.0).color(MUTED));
         }
         ui.add_space(4.0);
         egui::Grid::new("metrics").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
@@ -623,9 +655,15 @@ impl QodaApp {
         if let Some(d) = &self.decoder {
             let s = d.status.lock().unwrap().stats.clone();
             if s.locked {
-                let badge = Rect::from_min_size(video_rect.min + vec2(10.0, 10.0), vec2(72.0, 24.0));
-                painter.rect_filled(badge, CornerRadius::same(6), Color32::from_black_alpha(160));
-                painter.text(badge.center(), Align2::CENTER_CENTER, "● CANLI", FontId::proportional(13.0), BAD);
+                let mut label = "● CANLI".to_string();
+                if let Some(name) = &s.service.name {
+                    label += &format!("   {name}");
+                }
+                let galley = painter.layout_no_wrap(label, FontId::proportional(14.0), TEXT);
+                let at = video_rect.min + vec2(18.0, 15.0);
+                let badge = Rect::from_min_size(at - vec2(8.0, 5.0), galley.size() + vec2(16.0, 10.0));
+                painter.rect_filled(badge, CornerRadius::same(6), Color32::from_black_alpha(170));
+                painter.galley(at, galley, TEXT);
             }
         }
     }
@@ -749,13 +787,22 @@ impl QodaApp {
         }
     }
 
+    /// Çözülen yayının servis adı ve sağlayıcısı (izleme sürerken ve okunduysa).
+    fn service_title(&self) -> Option<(String, Option<String>)> {
+        let d = self.decoder.as_ref()?;
+        let service = d.status.lock().unwrap().stats.service.clone();
+        Some((service.name?, service.provider))
+    }
+
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (dot, color) = if self.handle.is_some() { ("●", GOOD) } else { ("●", MUTED) };
             ui.label(RichText::new(dot).color(color));
             ui.label(RichText::new(&self.status).size(12.0).color(MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("QODA · yAtölye · GPL-3.0").size(11.0).color(MUTED));
+                ui.label(RichText::new("GPL-3.0").size(11.0).color(MUTED));
+                ui.label(RichText::new("yAtölye").size(13.0).strong().color(BAND));
+                ui.label(RichText::new("QODA ·").size(13.0).color(MUTED));
             });
         });
     }
@@ -798,6 +845,19 @@ fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
             add(ui);
         });
     ui.add_space(10.0);
+}
+
+/// "yeniden atölye" çalışma grubunun belirgin rozeti.
+fn yatolye_badge(ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .fill(BAND.gamma_multiply(0.12))
+        .stroke(Stroke::new(1.0, BAND.gamma_multiply(0.7)))
+        .corner_radius(CornerRadius::same(14))
+        .inner_margin(egui::Margin::symmetric(12, 4))
+        .show(ui, |ui| {
+            ui.label(RichText::new("yAtölye").size(17.0).strong().color(BAND))
+                .on_hover_text("yeniden atölye çalışma grubu");
+        });
 }
 
 /// Küçük etiketli ölçüm kutucuğu.

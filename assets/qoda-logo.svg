@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>QODA</title>
+  <!-- Zemin -->
+  <rect width="256" height="256" rx="56" fill="#0B0F16"/>
+  <!-- Q / uydu yörüngesi -->
+  <circle cx="124" cy="124" r="70" fill="none" stroke="#38C8F0" stroke-width="22"/>
+  <!-- Q kuyruğu / yer bağlantısı ışını, koyu konturla halkadan ayrılır -->
+  <line x1="156" y1="156" x2="206" y2="206" stroke="#0B0F16" stroke-width="34" stroke-linecap="round"/>
+  <line x1="156" y1="156" x2="206" y2="206" stroke="#FBBF24" stroke-width="22" stroke-linecap="round"/>
+  <!-- Uydu -->
+  <circle cx="173.5" cy="74.5" r="14" fill="#FBBF24" stroke="#0B0F16" stroke-width="7"/>
+  <!-- Televizyon / oynat -->
+  <path d="M110 99 L110 149 L152 124 Z" fill="#E6EDF7" stroke="#E6EDF7" stroke-width="8" stroke-linejoin="round"/>
+</svg>

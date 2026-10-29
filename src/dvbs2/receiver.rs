@@ -19,6 +19,7 @@ use super::ldpc::{Decoded, LdpcCode};
 use super::plframe::{self, CarrierState};
 use super::plheader::{HEADER_LEN, HeaderHit, HeaderSearch, Modulation, Pls};
 use super::timing::TimingRecovery;
+use crate::tsinfo::{ServiceInfo, TsInfo};
 
 const TIMING_BANDWIDTH: f64 = 0.005;
 const CARRIER_BANDWIDTH: f32 = 0.005;
@@ -66,6 +67,8 @@ pub struct ReceiverStats {
     pub ldpc_iterations: usize,
     /// TS süreklilik sayacı kopuklukları (yayındaki eksik paketler).
     pub ts_cc_errors: u64,
+    /// DVB tablolarından okunan servis adı, sağlayıcı ve akışlar.
+    pub service: ServiceInfo,
 }
 
 struct FecState {
@@ -146,6 +149,7 @@ pub struct Receiver {
     scrambling: Vec<u8>,
     depacketizer: TsDepacketizer,
     last_cc: HashMap<u16, u8>,
+    ts_info: TsInfo,
     pub stats: ReceiverStats,
 }
 
@@ -176,6 +180,7 @@ impl Receiver {
             scrambling: Vec::new(),
             depacketizer: TsDepacketizer::default(),
             last_cc: Default::default(),
+            ts_info: TsInfo::default(),
             stats: ReceiverStats::default(),
             cfg,
         }
@@ -419,6 +424,10 @@ impl Receiver {
         let before = ts.len();
         self.depacketizer.push(&bytes, ts);
         self.count_cc_errors(&ts[before..]);
+        self.ts_info.push(&ts[before..]);
+        if self.ts_info.info() != &self.stats.service {
+            self.stats.service = self.ts_info.info().clone();
+        }
         self.stats.ts_packets = self.depacketizer.packets as u64;
         self.stats.ts_crc_errors = self.depacketizer.crc_errors as u64;
     }
