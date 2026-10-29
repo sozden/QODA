@@ -12,7 +12,7 @@ use std::thread;
 use num_complex::Complex;
 use soapysdr::Direction::Rx;
 
-use crate::dsp::Spectrum;
+use qoda::dsp::Spectrum;
 
 /// Bir saniyede üretilecek yaklaşık spektrum karesi sayısı.
 const FRAMES_PER_SECOND: f64 = 25.0;

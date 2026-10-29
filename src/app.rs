@@ -5,9 +5,9 @@ use eframe::egui::{
     TextureOptions, Vec2, pos2,
 };
 
-use crate::detect::{self, Detection};
+use qoda::detect::{self, Detection};
+use qoda::tuning;
 use crate::sdr::{self, Command, DeviceInfo, Event, Frame, Settings};
-use crate::tuning;
 
 const FFT_SIZE: usize = 2048;
 const WATERFALL_ROWS: usize = 300;
@@ -242,9 +242,10 @@ impl QodaApp {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        // Adda nokta olmamalı: uzantılar `with_extension` ile eklenir.
         let name = format!(
-            "qoda_{:.3}MHz_{:.0}ksps_{stamp}",
-            self.center_mhz,
+            "qoda_{:.0}kHz_{:.0}ksps_{stamp}",
+            self.center_mhz * 1e3,
             self.sample_rate_ms * 1e3
         );
         let path = std::path::Path::new(RECORDINGS_DIR).join(name);
