@@ -23,29 +23,33 @@ pub struct ServiceInfo {
 }
 
 impl ServiceInfo {
-    /// Akış türlerinin okunur adları, ör. "H.264 video, MP2 ses".
-    pub fn describe_streams(&self) -> String {
-        self.streams
-            .iter()
-            .filter_map(|&(_, t)| stream_type_name(t))
-            .collect::<Vec<_>>()
-            .join(", ")
+    /// Tanınan akışların kodek adı ve türü, PMT sırasıyla.
+    pub fn stream_list(&self) -> Vec<(&'static str, StreamKind)> {
+        self.streams.iter().filter_map(|&(_, t)| stream_type(t)).collect()
     }
 }
 
-/// ISO/IEC 13818-1 ve yaygın DVB akış türü kodları.
-pub fn stream_type_name(code: u8) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    Video,
+    Audio,
+    Data,
+}
+
+/// ISO/IEC 13818-1 ve yaygın DVB akış türü kodları: (kodek adı, tür).
+pub fn stream_type(code: u8) -> Option<(&'static str, StreamKind)> {
+    use StreamKind::*;
     Some(match code {
-        0x01 => "MPEG-1 video",
-        0x02 => "MPEG-2 video",
-        0x03 => "MP2 ses",
-        0x04 => "MPEG-2 ses",
-        0x0F => "AAC ses",
-        0x11 => "AAC-LATM ses",
-        0x1B => "H.264 video",
-        0x24 => "H.265 video",
-        0x81 => "AC-3 ses",
-        0x06 => "özel veri",
+        0x01 => ("MPEG-1", Video),
+        0x02 => ("MPEG-2", Video),
+        0x03 => ("MP2", Audio),
+        0x04 => ("MPEG-2", Audio),
+        0x0F => ("AAC", Audio),
+        0x11 => ("AAC-LATM", Audio),
+        0x1B => ("H.264", Video),
+        0x24 => ("H.265", Video),
+        0x81 => ("AC-3", Audio),
+        0x06 => ("PES", Data),
         _ => return None,
     })
 }
@@ -255,7 +259,7 @@ mod tests {
         assert_eq!(i.name.as_deref(), Some("A71A"));
         assert_eq!(i.provider.as_deref(), Some("QARS"));
         assert_eq!(i.streams, vec![(0x101, 0x1B), (0x102, 0x03)]);
-        assert_eq!(i.describe_streams(), "H.264 video, MP2 ses");
+        assert_eq!(i.stream_list(), vec![("H.264", StreamKind::Video), ("MP2", StreamKind::Audio)]);
     }
 
     #[test]

@@ -24,11 +24,19 @@ const TS_QUEUE_CHUNKS: usize = 1024;
 pub const VIDEO_WIDTH: usize = 1280;
 pub const VIDEO_HEIGHT: usize = 720;
 
+/// Oynatıcıyla ilgili sorunlar; metne arayüz kendi dilinde çevirir.
+#[derive(Debug, Clone)]
+pub enum PlayerIssue {
+    FfmpegMissing,
+    FfplayMissing,
+    StartFailed { program: &'static str, error: String },
+    Closed,
+}
+
 #[derive(Default, Clone)]
 pub struct DecoderStatus {
     pub stats: ReceiverStats,
-    /// Oynatıcı sorunları gibi bilgiler.
-    pub player: Option<String>,
+    pub player: Option<PlayerIssue>,
     /// Oynatıcılar yetişemediği için atlanan TS parçaları.
     pub ts_dropped: u64,
 }
@@ -119,7 +127,7 @@ fn spawn_writer(mut stdin: ChildStdin, status: Arc<Mutex<DecoderStatus>>) -> Syn
     thread::spawn(move || {
         while let Ok(chunk) = rx.recv() {
             if stdin.write_all(&chunk).is_err() {
-                status.lock().unwrap().player = Some("Oynatıcı kapandı".into());
+                status.lock().unwrap().player = Some(PlayerIssue::Closed);
                 break;
             }
         }
@@ -134,8 +142,8 @@ fn spawn_writer(mut stdin: ChildStdin, status: Arc<Mutex<DecoderStatus>>) -> Syn
 fn start_video(
     video: Arc<Mutex<Option<VideoFrame>>>,
     notify: impl Fn() + Send + 'static,
-) -> Result<(Child, ChildStdin), String> {
-    let exe = find_ffmpeg_tool("ffmpeg").ok_or("ffmpeg bulunamadı (FFmpeg kurulu ve PATH'te olmalı)")?;
+) -> Result<(Child, ChildStdin), PlayerIssue> {
+    let exe = find_ffmpeg_tool("ffmpeg").ok_or(PlayerIssue::FfmpegMissing)?;
     let filter = format!(
         "scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,\
          pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
@@ -148,7 +156,7 @@ fn start_video(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("ffmpeg başlatılamadı: {e}"))?;
+        .map_err(|e| PlayerIssue::StartFailed { program: "ffmpeg", error: e.to_string() })?;
     let stdin = child.stdin.take().unwrap();
     let mut stdout = child.stdout.take().unwrap();
     thread::spawn(move || {
@@ -167,15 +175,15 @@ fn start_video(
 }
 
 /// Sesi penceresiz ffplay ile çalar.
-fn start_audio() -> Result<Child, String> {
-    let exe = find_ffmpeg_tool("ffplay").ok_or("ses için ffplay bulunamadı")?;
+fn start_audio() -> Result<Child, PlayerIssue> {
+    let exe = find_ffmpeg_tool("ffplay").ok_or(PlayerIssue::FfplayMissing)?;
     background(Command::new(exe))
         .args(["-hide_banner", "-loglevel", "error", "-nodisp", "-infbuf", "-vn", "-sn", "-i", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("ffplay başlatılamadı: {e}"))
+        .map_err(|e| PlayerIssue::StartFailed { program: "ffplay", error: e.to_string() })
 }
 
 /// Windows'ta alt sürecin kendi konsol penceresini açmasını engeller.

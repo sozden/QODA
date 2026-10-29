@@ -4,8 +4,10 @@
 
 mod app;
 mod decoder;
+mod i18n;
 mod logo;
 mod sdr;
+mod settings;
 
 use eframe::egui;
 

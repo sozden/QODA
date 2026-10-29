@@ -75,7 +75,16 @@ pub enum Event {
     /// Kayıt sürüyor; şimdiye kadar yazılan örnek sayısı.
     Recording { path: PathBuf, samples: u64 },
     RecordingStopped,
-    Error(String),
+    Error(SdrError),
+}
+
+/// SDR iş parçacığının hataları; metne arayüz kendi dilinde çevirir.
+#[derive(Debug, Clone)]
+pub enum SdrError {
+    /// Cihaz ya da SoapySDR hatası (kütüphanenin kendi iletisiyle).
+    Device(String),
+    RecordingOpen(String),
+    RecordingWrite(String),
 }
 
 /// Açık bir SigMF kaydı.
@@ -97,7 +106,7 @@ impl Recording {
     "core:sample_rate": {sample_rate},
     "core:version": "1.0.0",
     "core:recorder": "QODA {version}",
-    "core:description": "QO-100 DATV IQ kaydı, LNB çıkışı IF {if_mhz:.6} MHz"
+    "core:description": "QO-100 DATV IQ recording, LNB output IF {if_mhz:.6} MHz"
   }},
   "captures": [
     {{ "core:sample_start": 0, "core:frequency": {rf_hz} }}
@@ -135,7 +144,7 @@ pub fn spawn(device_args: String, settings: Settings, notify: impl Fn() + Send +
     let (ev_tx, ev_rx) = mpsc::channel();
     thread::spawn(move || {
         if let Err(e) = run(&device_args, settings, &cmd_rx, &ev_tx, &notify) {
-            let _ = ev_tx.send(Event::Error(e.to_string()));
+            let _ = ev_tx.send(Event::Error(SdrError::Device(e.to_string())));
             notify();
         }
     });
@@ -201,7 +210,7 @@ fn run(
                     match Recording::start(path, s.sample_rate, rf_hz, s.if_hz) {
                         Ok(r) => recording = Some(r),
                         Err(e) => {
-                            let _ = events.send(Event::Error(format!("Kayıt açılamadı: {e}")));
+                            let _ = events.send(Event::Error(SdrError::RecordingOpen(e.to_string())));
                         }
                     }
                 }
@@ -240,7 +249,7 @@ fn run(
                 }
                 Err(e) => {
                     recording = None;
-                    let _ = events.send(Event::Error(format!("Kayıt yazılamadı: {e}")));
+                    let _ = events.send(Event::Error(SdrError::RecordingWrite(e.to_string())));
                 }
             }
         }

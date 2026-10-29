@@ -416,7 +416,18 @@ fn print_service(s: &qoda::tsinfo::ServiceInfo) {
         "  Servis: {} · sağlayıcı: {} · {}",
         s.name.as_deref().unwrap_or("?"),
         s.provider.as_deref().unwrap_or("?"),
-        s.describe_streams()
+        s.stream_list()
+            .iter()
+            .map(|(codec, kind)| {
+                let kind = match kind {
+                    qoda::tsinfo::StreamKind::Video => "video",
+                    qoda::tsinfo::StreamKind::Audio => "ses",
+                    qoda::tsinfo::StreamKind::Data => "veri",
+                };
+                format!("{codec} {kind}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 }
 

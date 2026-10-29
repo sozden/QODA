@@ -6,11 +6,15 @@ use eframe::egui::{
     Stroke, TextureHandle, TextureOptions, Vec2, pos2, vec2,
 };
 
-use crate::decoder::{self, Decoder, VIDEO_HEIGHT, VIDEO_WIDTH};
+use crate::decoder::{self, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
+use crate::i18n::{Lang, Strings, fill};
 use crate::logo;
-use crate::sdr::{self, Command, DeviceInfo, Event, Frame, Settings};
+use crate::sdr::{self, Command, DeviceInfo, Event, Frame, SdrError, Settings};
+use crate::settings::UserSettings;
 use qoda::detect::{self, Detection};
+use qoda::dvbs2::plheader::Pls;
 use qoda::dvbs2::receiver::ReceiverConfig;
+use qoda::tsinfo::{ServiceInfo, StreamKind};
 use qoda::tuning;
 
 const FFT_SIZE: usize = 2048;
@@ -48,11 +52,23 @@ mod palette {
 }
 use palette::*;
 
+/// Durum çubuğundaki ileti; seçili dilde gösterilir.
+enum Status {
+    NoDevice,
+    DevicesFound(usize),
+    Opened(String),
+    Stopped,
+    Saved(std::path::PathBuf),
+    Error(SdrError),
+    NoSignal(f64),
+}
+
 pub struct QodaApp {
+    lang: Lang,
     devices: Vec<DeviceInfo>,
     device_index: usize,
     handle: Option<sdr::Handle>,
-    status: String,
+    status: Status,
 
     lo_mhz: f64,
     /// Alıcının ayarlandığı RF merkez frekansı.
@@ -99,17 +115,15 @@ impl QodaApp {
             .iter()
             .position(|d| d.args.contains("driver=rtlsdr"))
             .unwrap_or(0);
-        let status = if devices.is_empty() {
-            "SDR cihazı bulunamadı".into()
-        } else {
-            format!("{} cihaz bulundu", devices.len())
-        };
+        let status = if devices.is_empty() { Status::NoDevice } else { Status::DevicesFound(devices.len()) };
+        let user = UserSettings::load();
         Self {
+            lang: user.lang,
             devices,
             device_index,
             handle: None,
             status,
-            lo_mhz: 9750.0,
+            lo_mhz: user.lnb_lo_mhz,
             center_mhz: 10491.5,
             selected_mhz: 10491.5,
             symbol_rate_ks: 1000.0,
@@ -132,6 +146,29 @@ impl QodaApp {
             pending_restart: None,
             signals: Vec::new(),
             frames_since_scan: 0,
+        }
+    }
+
+    fn t(&self) -> &'static Strings {
+        self.lang.strings()
+    }
+
+    fn save_settings(&self) {
+        UserSettings { lang: self.lang, lnb_lo_mhz: self.lo_mhz }.save();
+    }
+
+    fn status_text(&self) -> String {
+        let t = self.t();
+        match &self.status {
+            Status::NoDevice => t.status_no_device.to_string(),
+            Status::DevicesFound(n) => fill(t.status_devices, &[n]),
+            Status::Opened(label) => fill(t.status_opened, &[label]),
+            Status::Stopped => t.status_stopped.to_string(),
+            Status::Saved(path) => fill(t.status_saved, &[&path.display()]),
+            Status::Error(SdrError::Device(e)) => fill(t.status_error, &[e]),
+            Status::Error(SdrError::RecordingOpen(e)) => fill(t.status_recording_open, &[e]),
+            Status::Error(SdrError::RecordingWrite(e)) => fill(t.status_recording_write, &[e]),
+            Status::NoSignal(mhz) => fill(t.status_no_signal, &[&format!("{mhz:.3}")]),
         }
     }
 
@@ -161,14 +198,14 @@ impl QodaApp {
         };
         let ctx = ctx.clone();
         self.handle = Some(sdr::spawn(dev.args.clone(), settings, move || ctx.request_repaint()));
-        self.status = format!("{} açıldı", dev.label);
+        self.status = Status::Opened(dev.label.clone());
     }
 
     fn stop(&mut self) {
         self.stop_watch();
         self.handle = None;
         self.recording = None;
-        self.status = "Durduruldu".into();
+        self.status = Status::Stopped;
     }
 
     fn retune(&mut self, ctx: &egui::Context, center_mhz: f64) {
@@ -239,14 +276,14 @@ impl QodaApp {
                 Event::Recording { path, samples } => self.recording = Some((path, samples)),
                 Event::RecordingStopped => {
                     if let Some((path, _)) = self.recording.take() {
-                        self.status = format!("Kayıt kaydedildi: {}", path.with_extension("sigmf-data").display());
+                        self.status = Status::Saved(path.with_extension("sigmf-data"));
                     }
                 }
                 Event::Error(e) => error = Some(e),
             }
         }
         if let Some(e) = error {
-            self.status = format!("Hata: {e}");
+            self.status = Status::Error(e);
             self.stop_watch();
             self.handle = None;
             self.recording = None;
@@ -372,7 +409,7 @@ impl QodaApp {
                 self.symbol_rate_ks = (d.symbol_rate() / 1e3) as f32;
                 self.rolloff = nearest_rolloff(d.rolloff);
             }
-            None => self.status = format!("{mhz:.3} MHz civarında yayın bulunamadı"),
+            None => self.status = Status::NoSignal(mhz),
         }
     }
 
@@ -403,30 +440,31 @@ impl QodaApp {
     // ---- Üst bar ----
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
         ui.horizontal(|ui| {
             ui.add(egui::Image::new(&self.logo_tex).fit_to_exact_size(vec2(44.0, 44.0)));
             ui.vertical(|ui| {
                 ui.label(RichText::new("QODA").size(24.0).strong().color(ACCENT));
-                ui.label(RichText::new("QO-100 DATV Alıcı").size(12.0).color(MUTED));
+                ui.label(RichText::new(t.app_subtitle).size(12.0).color(MUTED));
             });
             ui.add_space(6.0);
-            yatolye_badge(ui);
+            yatolye_badge(ui, t);
             ui.add_space(24.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new("YAYIN  ·  rakam üzerinde tekerlek / tıklama").size(10.0).color(MUTED));
+                ui.label(RichText::new(t.broadcast_caps).size(10.0).color(MUTED));
                 if freq_tuner(ui, &mut self.selected_mhz, 22.0) {
                     self.selection_changed(ui.ctx());
                 }
             });
             ui.add_space(12.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new("SEMBOL HIZI").size(10.0).color(MUTED));
+                ui.label(RichText::new(t.symbol_rate_caps).size(10.0).color(MUTED));
                 ui.label(RichText::new(format!("{:.0} kS/s", self.symbol_rate_ks)).size(18.0).monospace().color(TEXT));
             });
             if let Some((name, provider)) = self.service_title() {
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("SERVİS").size(10.0).color(MUTED));
+                    ui.label(RichText::new(t.service_caps).size(10.0).color(MUTED));
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(name).size(18.0).strong().color(BAND));
                         if let Some(p) = provider {
@@ -439,13 +477,13 @@ impl QodaApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let watching = self.decoder.is_some();
                 let watch = if watching {
-                    egui::Button::new(RichText::new("■  İzlemeyi durdur").strong().color(Color32::WHITE)).fill(BAD.gamma_multiply(0.75))
+                    egui::Button::new(RichText::new(t.stop_watching).strong().color(Color32::WHITE)).fill(BAD.gamma_multiply(0.75))
                 } else {
-                    egui::Button::new(RichText::new("▶  İzle").strong().color(DEEP)).fill(ACCENT)
+                    egui::Button::new(RichText::new(t.watch).strong().color(DEEP)).fill(ACCENT)
                 };
                 if ui
                     .add_enabled(self.handle.is_some(), watch.min_size(vec2(150.0, 34.0)).corner_radius(8))
-                    .on_hover_text("Seçili yayını DVB-S2 olarak çöz ve videoyu göster")
+                    .on_hover_text(t.watch_tooltip)
                     .clicked()
                 {
                     if watching {
@@ -456,9 +494,9 @@ impl QodaApp {
                 }
                 let running = self.handle.is_some();
                 let power = if running {
-                    egui::Button::new(RichText::new("Alıcıyı durdur").color(TEXT))
+                    egui::Button::new(RichText::new(t.stop_receiver).color(TEXT))
                 } else {
-                    egui::Button::new(RichText::new("Alıcıyı başlat").strong().color(DEEP)).fill(GOOD)
+                    egui::Button::new(RichText::new(t.start_receiver).strong().color(DEEP)).fill(GOOD)
                 };
                 if ui
                     .add_enabled(running || !self.devices.is_empty(), power.min_size(vec2(150.0, 34.0)).corner_radius(8))
@@ -470,6 +508,21 @@ impl QodaApp {
                         self.start(ui.ctx());
                     }
                 }
+                ui.add_space(8.0);
+                let before = self.lang;
+                egui::ComboBox::from_id_salt("language")
+                    .width(96.0)
+                    .selected_text(self.lang.native_name())
+                    .show_ui(ui, |ui| {
+                        for l in Lang::ALL {
+                            ui.selectable_value(&mut self.lang, l, l.native_name());
+                        }
+                    })
+                    .response
+                    .on_hover_text(t.language);
+                if self.lang != before {
+                    self.save_settings();
+                }
             });
         });
     }
@@ -478,15 +531,17 @@ impl QodaApp {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            card(ui, "ALICI", |ui| self.receiver_card(ui));
-            card(ui, "FREKANS", |ui| self.frequency_card(ui));
-            card(ui, "YAYIN", |ui| self.broadcast_card(ui));
-            card(ui, "İZLEME", |ui| self.watch_card(ui));
-            card(ui, "KAYIT", |ui| self.recording_card(ui));
+            let t = self.t();
+            card(ui, t.card_receiver, |ui| self.receiver_card(ui));
+            card(ui, t.card_frequency, |ui| self.frequency_card(ui));
+            card(ui, t.card_broadcast, |ui| self.broadcast_card(ui));
+            card(ui, t.card_watch, |ui| self.watch_card(ui));
+            card(ui, t.card_recording, |ui| self.recording_card(ui));
         });
     }
 
     fn receiver_card(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
         let running = self.handle.is_some();
         ui.add_enabled_ui(!running, |ui| {
             ui.horizontal(|ui| {
@@ -499,14 +554,14 @@ impl QodaApp {
                             ui.selectable_value(&mut self.device_index, i, &d.label);
                         }
                     });
-                if ui.button("Yenile").clicked() {
+                if ui.button(t.refresh).clicked() {
                     self.devices = sdr::list_devices();
                     self.device_index = self.device_index.min(self.devices.len().saturating_sub(1));
                 }
             });
         });
         egui::Grid::new("receiver").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label(RichText::new("Örnekleme").color(MUTED));
+            ui.label(RichText::new(t.sample_rate).color(MUTED));
             let before = self.sample_rate_ms;
             egui::ComboBox::from_id_salt("rate")
                 .selected_text(format!("{} MS/s", self.sample_rate_ms))
@@ -523,8 +578,8 @@ impl QodaApp {
             }
             ui.end_row();
 
-            ui.label(RichText::new("Kazanç").color(MUTED));
-            let mut changed = ui.checkbox(&mut self.auto_gain, "Otomatik").changed();
+            ui.label(RichText::new(t.gain).color(MUTED));
+            let mut changed = ui.checkbox(&mut self.auto_gain, t.auto_gain).changed();
             ui.end_row();
             ui.label("");
             changed |= ui
@@ -538,36 +593,42 @@ impl QodaApp {
     }
 
     fn frequency_card(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
         let mut retune = false;
+        let lo_before = self.lo_mhz;
         egui::Grid::new("frequency").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label(RichText::new("LNB LO").color(MUTED));
+            ui.label(RichText::new(t.lnb_lo).color(MUTED));
             retune |= ui
                 .add(egui::DragValue::new(&mut self.lo_mhz).speed(0.01).range(0.0..=30_000.0).suffix(" MHz"))
                 .changed();
             ui.end_row();
-            ui.label(RichText::new("Merkez RF").color(MUTED));
+            ui.label(RichText::new(t.center_rf).color(MUTED));
             retune |= freq_tuner(ui, &mut self.center_mhz, 16.0);
             ui.end_row();
-            ui.label(RichText::new("Ara frekans").color(MUTED));
+            ui.label(RichText::new(t.intermediate_frequency).color(MUTED));
             ui.label(RichText::new(format!("{:.3} MHz", self.if_hz() / 1e6)).monospace().color(ACCENT));
             ui.end_row();
         });
         if retune {
             self.retune(ui.ctx(), self.center_mhz);
         }
+        if self.lo_mhz != lo_before {
+            self.save_settings();
+        }
     }
 
     fn broadcast_card(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
         egui::Grid::new("broadcast").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label(RichText::new("Frekans").color(MUTED));
+            ui.label(RichText::new(t.frequency).color(MUTED));
             if freq_tuner(ui, &mut self.selected_mhz, 16.0) {
                 self.selection_changed(ui.ctx());
             }
             ui.end_row();
-            ui.label(RichText::new("Sembol hızı").color(MUTED));
+            ui.label(RichText::new(t.symbol_rate).color(MUTED));
             ui.add(egui::DragValue::new(&mut self.symbol_rate_ks).speed(1.0).range(25.0..=2400.0).suffix(" kS/s"));
             ui.end_row();
-            ui.label(RichText::new("Roll-off").color(MUTED));
+            ui.label(RichText::new(t.rolloff).color(MUTED));
             egui::ComboBox::from_id_salt("rolloff")
                 .selected_text(format!("{:.2}", self.rolloff))
                 .show_ui(ui, |ui| {
@@ -576,51 +637,52 @@ impl QodaApp {
                     }
                 });
             ui.end_row();
-            ui.label(RichText::new("Bant genişliği").color(MUTED));
+            ui.label(RichText::new(t.bandwidth).color(MUTED));
             ui.label(RichText::new(format!("{:.0} kHz", self.occupied_khz())).monospace());
             ui.end_row();
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button("Otomatik bul").on_hover_text("Seçili frekanstaki yayının parametrelerini spektrumdan bul").clicked() {
+            if ui.button(t.auto_detect).on_hover_text(t.auto_detect_tooltip).clicked() {
                 self.auto_detect(self.selected_mhz);
             }
-            if ui.button("Ortala").on_hover_text("Alıcıyı seçili yayına ayarla").clicked() {
+            if ui.button(t.center).on_hover_text(t.center_tooltip).clicked() {
                 self.retune(ui.ctx(), self.selected_mhz);
             }
         });
         ui.add_space(2.0);
         let hint = match &self.detection {
-            None => "Spektrumda yayına tıklayın; çift tıklama ortalar, tekerlek kaydırır, sürükleme alıcıyı kaydırır.".to_string(),
+            None => t.broadcast_hint.to_string(),
             Some(d) => {
-                let mut t = format!("Ölçülen {:.1} kS/s", d.measured_symbol_rate / 1e3);
+                let mut text = fill(t.measured, &[&format!("{:.1}", d.measured_symbol_rate / 1e3)]);
                 if let Some(r) = d.common_symbol_rate {
-                    t += &format!(" ≈ {:.0}", r / 1e3);
+                    text += &format!(" ≈ {:.0}", r / 1e3);
                 }
-                t += &format!(" · roll-off ~{:.2} · SNR {:.1} dB", d.rolloff, d.snr_db);
+                text += &format!(" · roll-off ~{:.2} · SNR {:.1} dB", d.rolloff, d.snr_db);
                 if d.truncated {
-                    t += " · kenara taşıyor, ortalayın";
+                    text += t.near_edge;
                 }
-                t
+                text
             }
         };
         ui.label(RichText::new(hint).size(11.0).color(MUTED));
     }
 
     fn watch_card(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
         let before = self.audio;
-        ui.checkbox(&mut self.audio, "Ses");
+        ui.checkbox(&mut self.audio, t.audio);
         if self.audio != before && self.decoder.is_some() {
             self.start_watch(ui.ctx());
         }
         let Some(d) = &self.decoder else {
-            ui.label(RichText::new("İzleme kapalı").color(MUTED));
+            ui.label(RichText::new(t.not_watching).color(MUTED));
             return;
         };
         let status = d.status.lock().unwrap().clone();
         let dropped = d.dropped.load(std::sync::atomic::Ordering::Relaxed);
         let s = &status.stats;
-        let (lock_text, lock_color) = if s.locked { ("Kilitli", GOOD) } else { ("Senkron aranıyor", WARN) };
+        let (lock_text, lock_color) = if s.locked { (t.locked, GOOD) } else { (t.searching, WARN) };
         ui.horizontal(|ui| {
             dot(ui, lock_color);
             ui.label(RichText::new(lock_text).strong().color(lock_color));
@@ -634,39 +696,44 @@ impl QodaApp {
             });
         }
         if let Some(p) = s.pls {
-            ui.label(RichText::new(p.describe()).color(TEXT));
+            ui.label(RichText::new(describe_pls(&p, t)).color(TEXT));
         }
-        let streams = s.service.describe_streams();
+        let streams = describe_streams(&s.service, t);
         if !streams.is_empty() {
             ui.label(RichText::new(streams).size(11.0).color(MUTED));
         }
         ui.add_space(4.0);
         egui::Grid::new("metrics").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             metric(ui, "SNR", &format!("{:.1} dB", s.snr_db), snr_color(s.snr_db));
-            metric(ui, "Taşıyıcı", &format!("{:+.1} kHz", s.carrier_offset_hz / 1e3), TEXT);
+            metric(ui, t.metric_carrier, &format!("{:+.1} kHz", s.carrier_offset_hz / 1e3), TEXT);
             ui.end_row();
-            metric(ui, "Çerçeve ✓", &s.frames_ok.to_string(), GOOD);
-            metric(ui, "Çerçeve ✗", &s.frames_failed.to_string(), if s.frames_failed > 0 { BAD } else { TEXT });
+            metric(ui, t.metric_frames_ok, &s.frames_ok.to_string(), GOOD);
+            metric(ui, t.metric_frames_failed, &s.frames_failed.to_string(), if s.frames_failed > 0 { BAD } else { TEXT });
             ui.end_row();
             metric(ui, "LDPC", &format!("{} it", s.ldpc_iterations), TEXT);
-            metric(ui, "TS paket", &s.ts_packets.to_string(), TEXT);
+            metric(ui, t.metric_ts_packets, &s.ts_packets.to_string(), TEXT);
             ui.end_row();
         });
         let mut warnings = Vec::new();
         if s.ts_cc_errors > 0 {
-            warnings.push(format!("{} CC kopukluğu (yayında eksik paket)", s.ts_cc_errors));
+            warnings.push(fill(t.warn_cc, &[&s.ts_cc_errors]));
         }
         if s.frames_unsupported > 0 {
-            warnings.push(format!("{} çerçeve desteklenmeyen modülasyonda", s.frames_unsupported));
+            warnings.push(fill(t.warn_unsupported, &[&s.frames_unsupported]));
         }
         if dropped > 0 {
-            warnings.push(format!("{dropped} IQ bloğu atlandı"));
+            warnings.push(fill(t.warn_iq_dropped, &[&dropped]));
         }
         if status.ts_dropped > 0 {
-            warnings.push(format!("{} TS parçası atlandı", status.ts_dropped));
+            warnings.push(fill(t.warn_ts_dropped, &[&status.ts_dropped]));
         }
-        if let Some(p) = &status.player {
-            warnings.push(p.clone());
+        if let Some(issue) = &status.player {
+            warnings.push(match issue {
+                PlayerIssue::FfmpegMissing => t.ffmpeg_missing.to_string(),
+                PlayerIssue::FfplayMissing => t.ffplay_missing.to_string(),
+                PlayerIssue::StartFailed { program, error } => fill(t.player_start_failed, &[program, error]),
+                PlayerIssue::Closed => t.player_closed.to_string(),
+            });
         }
         for w in warnings {
             ui.label(RichText::new(w).size(11.0).color(WARN));
@@ -674,11 +741,12 @@ impl QodaApp {
     }
 
     fn recording_card(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
         let running = self.handle.is_some();
-        let label = if self.recording.is_some() { "■  Kaydı bitir" } else { "IQ kaydet" };
+        let label = if self.recording.is_some() { t.stop_recording } else { t.record };
         if ui
             .add_enabled(running, egui::Button::new(label).min_size(vec2(ui.available_width(), 28.0)))
-            .on_hover_text("Ham IQ örneklerini SigMF olarak recordings klasörüne kaydet. Frekans veya örnekleme hızı değişince kayıt kapanır.")
+            .on_hover_text(t.record_tooltip)
             .clicked()
         {
             self.toggle_recording();
@@ -697,6 +765,7 @@ impl QodaApp {
     // ---- Orta alan ----
 
     fn video(&self, ui: &mut egui::Ui, rect: Rect) {
+        let t = self.t();
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::same(10), DEEP);
         painter.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
@@ -718,14 +787,14 @@ impl QodaApp {
                     .decoder
                     .as_ref()
                     .is_some_and(|d| d.status.lock().unwrap().stats.locked);
-                let text = if locked { "Video bekleniyor…" } else { "DVB-S2 senkronu aranıyor…" };
+                let text = if locked { t.video_waiting } else { t.video_searching };
                 painter.text(video_rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(18.0), MUTED);
             }
         }
         if let Some(d) = &self.decoder {
             let s = d.status.lock().unwrap().stats.clone();
             if s.locked {
-                let mut label = "CANLI".to_string();
+                let mut label = t.live.to_string();
                 if let Some(name) = &s.service.name {
                     label += &format!("   {name}");
                 }
@@ -875,14 +944,15 @@ impl QodaApp {
 
     /// Üstte bulunan yayınların şeridi, altında spektrum.
     fn spectrum_with_signals(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let t = self.t();
         let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 30.0));
         let spec = Rect::from_min_max(pos2(rect.left(), strip.bottom() + 6.0), rect.max);
         let mut picked = None;
         ui.scope_builder(egui::UiBuilder::new().max_rect(strip), |ui| {
             ui.horizontal_centered(|ui| {
-                ui.label(RichText::new("YAYINLAR").size(10.0).strong().color(MUTED));
+                ui.label(RichText::new(t.signals_caps).size(10.0).strong().color(MUTED));
                 if self.signals.is_empty() {
-                    ui.label(RichText::new("bu bantta yayın görünmüyor").size(11.0).color(MUTED));
+                    ui.label(RichText::new(t.signals_none).size(11.0).color(MUTED));
                 }
                 for &(mhz, rs, rolloff) in &self.signals {
                     let selected = (mhz - self.selected_mhz).abs() < 0.02;
@@ -892,7 +962,7 @@ impl QodaApp {
                     } else {
                         egui::Button::new(text.color(TEXT))
                     };
-                    if ui.add(button.corner_radius(12)).on_hover_text("Bu yayını seç").clicked() {
+                    if ui.add(button.corner_radius(12)).on_hover_text(t.signal_tooltip).clicked() {
                         picked = Some((mhz, rs, rolloff));
                     }
                 }
@@ -914,7 +984,7 @@ impl QodaApp {
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             dot(ui, if self.handle.is_some() { GOOD } else { MUTED });
-            ui.label(RichText::new(&self.status).size(12.0).color(MUTED));
+            ui.label(RichText::new(self.status_text()).size(12.0).color(MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new("GPL-3.0").size(11.0).color(MUTED));
                 ui.label(RichText::new("yAtölye").size(13.0).strong().color(BAND));
@@ -1054,8 +1124,36 @@ fn nearest_rolloff(r: f32) -> f32 {
         .unwrap_or(0.35)
 }
 
+/// Çerçeve sinyalleşmesinin seçili dildeki tanımı, ör. "QPSK 4/5, normal frame, no pilots".
+fn describe_pls(p: &Pls, t: &Strings) -> String {
+    let size = if p.short_frame { t.frame_short } else { t.frame_normal };
+    let pilots = if p.pilots { t.pilots_on } else { t.pilots_off };
+    match (p.modcod, p.modulation_and_rate()) {
+        (0, _) => t.frame_dummy.to_string(),
+        (_, Some((m, (n, d)))) => format!("{} {n}/{d}, {size}, {pilots}", m.name()),
+        (mc, None) => fill(t.modcod_reserved, &[&mc]),
+    }
+}
+
+/// Akış türlerinin seçili dildeki listesi, ör. "H.264 video, MP2 audio".
+fn describe_streams(service: &ServiceInfo, t: &Strings) -> String {
+    service
+        .stream_list()
+        .iter()
+        .map(|(codec, kind)| {
+            let kind = match kind {
+                StreamKind::Video => t.stream_video,
+                StreamKind::Audio => t.stream_audio,
+                StreamKind::Data => t.stream_data,
+            };
+            format!("{codec} {kind}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// "yeniden atölye" çalışma grubunun belirgin rozeti.
-fn yatolye_badge(ui: &mut egui::Ui) {
+fn yatolye_badge(ui: &mut egui::Ui, t: &Strings) {
     egui::Frame::new()
         .fill(BAND.gamma_multiply(0.12))
         .stroke(Stroke::new(1.0, BAND.gamma_multiply(0.7)))
@@ -1063,7 +1161,7 @@ fn yatolye_badge(ui: &mut egui::Ui) {
         .inner_margin(egui::Margin::symmetric(12, 4))
         .show(ui, |ui| {
             ui.label(RichText::new("yAtölye").size(17.0).strong().color(BAND))
-                .on_hover_text("yeniden atölye çalışma grubu");
+                .on_hover_text(t.yatolye_tooltip);
         });
 }
 
