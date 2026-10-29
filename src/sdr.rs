@@ -6,7 +6,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 
 use num_complex::Complex;
@@ -57,6 +57,8 @@ pub enum Command {
     /// `.sigmf-data` ve `.sigmf-meta` dosyaları oluşturulur.
     StartRecording { path: PathBuf, rf_hz: f64 },
     StopRecording,
+    /// Okunan her IQ bloğunun kopyasını bu kanala gönder (canlı çözücü için); None durdurur.
+    IqTap(Option<SyncSender<Vec<Complex<f32>>>>),
 }
 
 pub struct Frame {
@@ -163,6 +165,7 @@ fn run(
     stream.activate(None)?;
     let mut spectrum = Spectrum::new(s.fft_size);
     let mut recording: Option<Recording> = None;
+    let mut tap: Option<SyncSender<Vec<Complex<f32>>>> = None;
     let stop_recording = |rec: &mut Option<Recording>| {
         if let Some(mut r) = rec.take() {
             let _ = r.data.flush();
@@ -200,6 +203,7 @@ fn run(
                     }
                 }
                 Ok(Command::StopRecording) => stop_recording(&mut recording),
+                Ok(Command::IqTap(t)) => tap = t,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
@@ -216,6 +220,13 @@ fn run(
             }
         }
 
+        if let Some(t) = &tap {
+            // Çözücü yetişemezse blok atlanır; SDR okuması hiç bekletilmez.
+            match t.try_send(samples.clone()) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => tap = None,
+            }
+        }
         if let Some(r) = &mut recording {
             match r.write(&samples) {
                 Ok(()) => {

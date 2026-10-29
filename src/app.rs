@@ -7,7 +7,9 @@ use eframe::egui::{
 
 use qoda::detect::{self, Detection};
 use qoda::tuning;
+use crate::decoder::{self, Decoder};
 use crate::sdr::{self, Command, DeviceInfo, Event, Frame, Settings};
+use qoda::dvbs2::receiver::ReceiverConfig;
 
 const FFT_SIZE: usize = 2048;
 const WATERFALL_ROWS: usize = 300;
@@ -37,6 +39,8 @@ pub struct QodaApp {
     gain_db: f64,
 
     detection: Option<Detection>,
+    /// Canlı DVB-S2 çözücü (izleme sürerken).
+    decoder: Option<Decoder>,
     /// Süren kaydın yolu ve yazılan örnek sayısı.
     recording: Option<(std::path::PathBuf, u64)>,
 
@@ -75,6 +79,7 @@ impl QodaApp {
             gain_db: 30.0,
             detection: None,
             recording: None,
+            decoder: None,
             last_frame: None,
             smoothed: Vec::new(),
             range: (-100.0, -40.0),
@@ -113,6 +118,7 @@ impl QodaApp {
     }
 
     fn stop(&mut self) {
+        self.decoder = None;
         self.handle = None;
         self.recording = None;
         self.status = "Durduruldu".into();
@@ -121,6 +127,61 @@ impl QodaApp {
     fn retune(&mut self, center_mhz: f64) {
         self.center_mhz = center_mhz;
         self.send(Command::Tune(self.if_hz()));
+        // Yayının ofseti değişti; izleme sürüyorsa çözücüyü yeni ayarla başlat.
+        if self.decoder.is_some() {
+            self.start_watch();
+        }
+    }
+
+    /// Seçili yayını canlı çözmeye ve video penceresinde göstermeye başlar.
+    fn start_watch(&mut self) {
+        self.stop_watch();
+        if self.handle.is_none() {
+            return;
+        }
+        let cfg = ReceiverConfig {
+            sample_rate: self.sample_rate_ms * 1e6,
+            offset_hz: (self.selected_mhz - self.center_mhz) * 1e6,
+            symbol_rate: self.symbol_rate_ks as f64 * 1e3,
+            rolloff: self.rolloff as f64,
+        };
+        let title = format!("QODA - {:.3} MHz, {:.0} kS/s", self.selected_mhz, self.symbol_rate_ks);
+        let d = decoder::spawn(cfg, title);
+        self.send(Command::IqTap(Some(d.iq.clone())));
+        self.decoder = Some(d);
+    }
+
+    fn stop_watch(&mut self) {
+        if self.decoder.take().is_some() {
+            self.send(Command::IqTap(None));
+        }
+    }
+
+    fn decoder_text(&self) -> Option<(Color32, String)> {
+        let d = self.decoder.as_ref()?;
+        let status = d.status.lock().unwrap().clone();
+        let s = &status.stats;
+        let mut text = if s.locked {
+            let pls = s.pls.map_or(String::new(), |p| p.describe());
+            format!(
+                "Kilitli · {pls} · SNR {:.1} dB · çerçeve {} ✓ {} ✗ · TS {} paket · taşıyıcı {:+.1} kHz",
+                s.snr_db,
+                s.frames_ok,
+                s.frames_failed,
+                s.ts_packets,
+                s.carrier_offset_hz / 1e3
+            )
+        } else {
+            "DVB-S2 senkronu aranıyor…".to_string()
+        };
+        if s.frames_unsupported > 0 {
+            text += &format!(" · {} çerçeve desteklenmeyen modülasyonda", s.frames_unsupported);
+        }
+        if let Some(p) = &status.player {
+            text += &format!(" · {p}");
+        }
+        let color = if s.locked { Color32::from_rgb(110, 220, 110) } else { Color32::from_rgb(240, 200, 90) };
+        Some((color, text))
     }
 
     fn poll_events(&mut self) {
@@ -309,6 +370,9 @@ impl QodaApp {
                 });
             if self.sample_rate_ms != before {
                 self.send(Command::SampleRate(self.sample_rate_ms * 1e6));
+                if self.decoder.is_some() {
+                    self.start_watch();
+                }
             }
 
             ui.separator();
@@ -354,8 +418,23 @@ impl QodaApp {
             if ui.button("Otomatik bul").on_hover_text("Seçili frekanstaki yayının parametrelerini spektrumdan bul").clicked() {
                 self.auto_detect(self.selected_mhz);
             }
+            ui.separator();
+            if self.decoder.is_some() {
+                if ui.button("⏹ İzlemeyi durdur").clicked() {
+                    self.stop_watch();
+                }
+            } else if ui
+                .add_enabled(self.handle.is_some(), egui::Button::new("▶ İzle"))
+                .on_hover_text("Seçili yayını DVB-S2 olarak çöz ve videoyu ayrı pencerede oynat (ffplay)")
+                .clicked()
+            {
+                self.start_watch();
+            }
         });
         ui.label(self.detection_text());
+        if let Some((color, text)) = self.decoder_text() {
+            ui.colored_label(color, text);
+        }
     }
 
     fn occupied_khz(&self) -> f32 {

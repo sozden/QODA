@@ -15,6 +15,8 @@ Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR ci
 2. `cargo run --release` ile QODA'yı başlatın.
 3. Cihazı seçip **Başlat**'a basın. LNB LO ve merkez RF frekansını girin; IF otomatik hesaplanır.
 4. Spektrumda bir yayına **tıklayın** (seçer) ya da **çift tıklayın** (seçer ve alıcıyı oraya ortalar). Sembol hızı ve roll-off'a göre kaplanan bant mavi olarak gösterilir.
+5. **▶ İzle** düğmesi seçili yayını canlı olarak DVB-S2 çözer ve videoyu ayrı bir pencerede (ffplay) oynatır. Kilit durumu, MODCOD, SNR ve çerçeve sayaçları arayüzde görünür. Video için [FFmpeg](https://ffmpeg.org/) kurulu olmalıdır (ör. `winget install Gyan.FFmpeg`).
+6. **⏺ Kaydet** ham IQ'yu SigMF olarak kaydeder; kayıtlar `qoda-analyze <kayıt>` ile çözülebilir.
 
 ## Planlanan özellikler
 
@@ -22,7 +24,7 @@ Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR ci
 - LNB LO ve yayın frekansından IF hesabı ve otomatik ayar
 - Spektrum ve şelale görünümü, tıklayarak frekans seçimi
 - Yayın üzerindeki sembol hızı, bant genişliği ve FEC'in otomatik tespiti
-- Sıfırdan Rust ile yazılmış DVB-S2 çözücü (ETSI EN 302 307 standardı temel alınır)
+- Sıfırdan Rust ile yazılmış DVB-S2 çözücü (ETSI EN 302 307 standardı temel alınır): şu an QPSK (pilotlu/pilotsuz, normal/kısa çerçeve); 8PSK/APSK ve BCH hata düzeltme sırada
 
 ## Lisans
 
