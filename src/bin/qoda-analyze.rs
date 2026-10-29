@@ -8,12 +8,14 @@ use std::process::ExitCode;
 use num_complex::Complex;
 use qoda::detect;
 use qoda::dsp::Spectrum;
-use qoda::dvbs2::{filters, plheader, timing};
+use qoda::dvbs2::{filters, plframe, plheader, timing};
 
 const SOF_THRESHOLD: f32 = 0.7;
 /// Bu PLS güveninin altındaki başlıklar yanlış alarm sayılır.
 const MIN_PLS_MARGIN: f32 = 0.2;
 const TIMING_BANDWIDTH: f64 = 0.005;
+/// Çerçeve gövdesindeki taşıyıcı takip döngüsünün bant genişliği.
+const CARRIER_BANDWIDTH: f32 = 0.002;
 
 struct Args {
     path: PathBuf,
@@ -174,7 +176,58 @@ fn run() -> Result<(), String> {
         "  Spektrum merkezine göre frekans kayması {:+.2} kHz, ortalama başlık SNR'ı {mean_snr:.1} dB",
         mean_df / 1e3
     );
+
+    demap_frames(&symbols, &hits);
     Ok(())
+}
+
+/// Pilotsuz QPSK çerçevelerinin gövdelerini çözüp gövde boyunca SNR'ı raporlar.
+fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) {
+    let mut scrambling: Vec<u8> = Vec::new();
+    let mut snrs = Vec::new();
+    // Başlık başına frekans tahmini gürültülü; ortak kayma için ortancayı kullan.
+    let mut ws: Vec<f32> = hits.iter().map(|h| h.freq_rad_per_symbol).collect();
+    ws.sort_by(f32::total_cmp);
+    let common_w = ws[ws.len() / 2];
+    for h in hits {
+        let qpsk = matches!(h.pls.modulation_and_rate(), Some((plheader::Modulation::Qpsk, _)));
+        let Some(len) = h.pls.frame_len() else { continue };
+        let body_len = len - plheader::HEADER_LEN;
+        let start = h.position + plheader::HEADER_LEN;
+        if !qpsk || h.pls.pilots || start + body_len > symbols.len() {
+            continue;
+        }
+        if scrambling.len() < body_len {
+            scrambling = plframe::scrambling_sequence(0, body_len);
+        }
+        let carrier = plframe::body_start(h.phase, common_w);
+        let body = &symbols[start..start + body_len];
+        // Gövdeyi dörde bölüp her parçadaki SNR'a bak: takip kaçarsa sonlara doğru düşer.
+        let out = plframe::demap_qpsk(body, &scrambling[..body_len], carrier, CARRIER_BANDWIDTH);
+        let quarter = body_len / 4;
+        let parts: Vec<f32> = (0..4)
+            .map(|i| {
+                let seg = &out.llr[2 * i * quarter..2 * (i + 1) * quarter];
+                let mean_abs = seg.iter().map(|l| l.abs()).sum::<f32>() / seg.len() as f32;
+                let var = seg.iter().map(|l| (l.abs() - mean_abs).powi(2)).sum::<f32>() / seg.len() as f32;
+                10.0 * (mean_abs * mean_abs / var.max(1e-12) / 2.0).log10()
+            })
+            .collect();
+        snrs.push((h.position, out.snr_db, parts));
+    }
+    if snrs.is_empty() {
+        println!("Gövdesi çözülebilecek pilotsuz QPSK çerçevesi yok.");
+        return;
+    }
+    println!();
+    println!("Gövde çözümü (karıştırma çözümü + taşıyıcı takibi + QPSK demap):");
+    println!("{:>9} {:>8}   çeyreklerde SNR dB", "konum", "SNR dB");
+    for (pos, snr, parts) in snrs.iter().take(8) {
+        println!("{pos:>9} {snr:>8.1}   {:.1} {:.1} {:.1} {:.1}", parts[0], parts[1], parts[2], parts[3]);
+    }
+    let mean = snrs.iter().map(|s| s.1).sum::<f32>() / snrs.len() as f32;
+    let worst = snrs.iter().map(|s| s.1).fold(f32::INFINITY, f32::min);
+    println!("  {} çerçeve, ortalama gövde SNR'ı {mean:.1} dB, en kötü {worst:.1} dB", snrs.len());
 }
 
 fn nearest_rolloff(r: f32) -> f64 {

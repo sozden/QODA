@@ -150,6 +150,8 @@ pub struct HeaderHit {
     pub pls_margin: f32,
     /// Başlık boyunca ölçülen frekans kayması (radyan/sembol).
     pub freq_rad_per_symbol: f32,
+    /// Başlığın ilk sembolündeki taşıyıcı fazı (radyan).
+    pub phase: f32,
     /// Bilinen başlık sembollerinden ölçülen sembol başına SNR (dB).
     pub snr_db: f32,
 }
@@ -232,6 +234,7 @@ pub fn find_headers(symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> 
             sof_metric,
             pls_margin,
             freq_rad_per_symbol: w,
+            phase: carrier_phase(&symbols[pos..pos + HEADER_LEN], w, &ideal),
             snr_db,
         });
         p = pos + HEADER_LEN;
@@ -239,17 +242,26 @@ pub fn find_headers(symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> 
     hits
 }
 
-/// Frekans kaymasını (`w` radyan/sembol) çıkarır ve fazı bilinen ilk
-/// `known.len()` sembole göre hizalar.
+/// Başlığın ilk sembolündeki taşıyıcı fazı; frekans kayması `w` çıkarıldıktan
+/// sonra bilinen ilk `known.len()` sembole göre ölçülür.
+fn carrier_phase(header: &[Complex<f32>], w: f32, known: &[Complex<f32>]) -> f32 {
+    let acc: Complex<f32> = header
+        .iter()
+        .zip(known)
+        .enumerate()
+        .map(|(i, (z, h))| z * Complex::from_polar(1.0, -w * i as f32) * h.conj())
+        .sum();
+    acc.arg()
+}
+
+/// Frekans kaymasını ve taşıyıcı fazını çıkarıp başlığı ideal sembollerle hizalar.
 fn align(header: &[Complex<f32>], w: f32, known: &[Complex<f32>]) -> Vec<Complex<f32>> {
-    let derot: Vec<Complex<f32>> = header
+    let phase = carrier_phase(header, w, known);
+    header
         .iter()
         .enumerate()
-        .map(|(i, z)| z * Complex::from_polar(1.0, -w * i as f32))
-        .collect();
-    let acc: Complex<f32> = derot.iter().zip(known).map(|(z, h)| z * h.conj()).sum();
-    let phase = Complex::from_polar(1.0, -acc.arg());
-    derot.iter().map(|z| z * phase).collect()
+        .map(|(i, z)| z * Complex::from_polar(1.0, -w * i as f32 - phase))
+        .collect()
 }
 
 /// PLS kodunu en yüksek ilişkili aday olarak seçer; (kod, güven payı) döndürür.
