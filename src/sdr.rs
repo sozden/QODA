@@ -186,9 +186,9 @@ fn run(
                 Ok(Command::SampleRate(rate)) => {
                     s.sample_rate = rate;
                     stop_recording(&mut recording);
-                    stream.deactivate(None)?;
+                    // Akışı durdurmadan değiştir: bazı rtlsdr.dll sürümleri
+                    // deactivate sırasında çöküyor.
                     dev.set_sample_rate(Rx, 0, rate)?;
-                    stream.activate(None)?;
                 }
                 Ok(Command::StartRecording { path, rf_hz }) => {
                     stop_recording(&mut recording);
@@ -201,10 +201,7 @@ fn run(
                 }
                 Ok(Command::StopRecording) => stop_recording(&mut recording),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    stream.deactivate(None)?;
-                    return Ok(());
-                }
+                Err(TryRecvError::Disconnected) => return Ok(()),
             }
         }
 
@@ -237,7 +234,6 @@ fn run(
             db: spectrum.compute(&samples),
         };
         if events.send(Event::Frame(frame)).is_err() {
-            stream.deactivate(None)?;
             return Ok(());
         }
         notify();

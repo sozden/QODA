@@ -11,6 +11,7 @@ Erken geliştirme aşamasında. İlk hedef: RTL-SDR, HackRF ve Pluto/LibreSDR ci
 ## Kullanım
 
 1. Windows'ta [PothosSDR](https://downloads.myriadrf.org/builds/PothosSDR/) kurun ve `bin` klasörünü PATH'e ekleyin (SoapySDR ve RTL-SDR sürücüsü bununla gelir).
+   PothosSDR 2021 ile gelen eski `rtlsdr.dll` akış durdurulurken çökebiliyor. [RTL-SDR Blog sürümlerinden](https://github.com/rtlsdrblog/rtl-sdr-blog/releases) `x64` klasöründeki `rtlsdr.dll`, `pthreadVC2.dll` ve `msvcr100.dll` dosyalarını `qoda.exe`'nin yanına koyun.
 2. `cargo run --release` ile QODA'yı başlatın.
 3. Cihazı seçip **Başlat**'a basın. LNB LO ve merkez RF frekansını girin; IF otomatik hesaplanır.
 4. Spektrumda bir yayına **tıklayın** (seçer) ya da **çift tıklayın** (seçer ve alıcıyı oraya ortalar). Sembol hızı ve roll-off'a göre kaplanan bant mavi olarak gösterilir.
