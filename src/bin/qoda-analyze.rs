@@ -293,17 +293,44 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
     std::fs::write(ts_path, &ts).map_err(|e| format!("{}: {e}", ts_path.display()))?;
     println!("  TS dosyası: {}", ts_path.display());
 
-    let mut pids: Vec<(u16, usize)> = Vec::new();
+    // PID başına paket sayısı ve süreklilik sayacı (CC) kopuklukları.
+    let mut pids: Vec<(u16, usize, usize)> = Vec::new();
+    let mut last_cc: std::collections::HashMap<u16, u8> = Default::default();
     for p in ts.chunks_exact(188) {
         let pid = (((p[1] & 0x1F) as u16) << 8) | p[2] as u16;
-        match pids.iter_mut().find(|(q, _)| *q == pid) {
-            Some((_, c)) => *c += 1,
-            None => pids.push((pid, 1)),
+        let has_payload = p[3] & 0x10 != 0;
+        let cc = p[3] & 0x0F;
+        let mut gap = 0;
+        if pid != 0x1FFF && has_payload {
+            if let Some(&prev) = last_cc.get(&pid) {
+                // Aynı CC'li tekrar paketine izin verilir.
+                if cc != (prev + 1) % 16 && cc != prev {
+                    gap = 1;
+                }
+            }
+            last_cc.insert(pid, cc);
+        }
+        match pids.iter_mut().find(|(q, _, _)| *q == pid) {
+            Some((_, c, g)) => {
+                *c += 1;
+                *g += gap;
+            }
+            None => pids.push((pid, 1, gap)),
         }
     }
     pids.sort();
-    let list: Vec<String> = pids.iter().map(|(p, c)| format!("0x{p:04X}×{c}")).collect();
+    let list: Vec<String> = pids
+        .iter()
+        .map(|(p, c, g)| if *g > 0 { format!("0x{p:04X}×{c} ({g} CC kopukluğu)") } else { format!("0x{p:04X}×{c}") })
+        .collect();
     println!("  PID'ler: {}", list.join(", "));
+    let gaps: usize = pids.iter().map(|(_, _, g)| g).sum();
+    if gaps > 0 {
+        println!(
+            "  Not: BBFRAME'lerin tamamı BCH/CRC denetiminden geçtiği için CC kopuklukları
+        yayının kendisindeki eksik paketleri gösterir."
+        );
+    }
     Ok(())
 }
 
