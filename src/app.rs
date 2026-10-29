@@ -183,6 +183,9 @@ impl QodaApp {
         if dropped > 0 {
             text += &format!(" · {dropped} IQ bloğu atlandı (çözücü yetişemedi)");
         }
+        if status.ts_dropped > 0 {
+            text += &format!(" · {} TS parçası atlandı (oynatıcı yetişemedi)", status.ts_dropped);
+        }
         if let Some(p) = &status.player {
             text += &format!(" · {p}");
         }

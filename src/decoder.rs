@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,12 +14,16 @@ use qoda::dvbs2::receiver::{Receiver as DvbReceiver, ReceiverConfig, ReceiverSta
 
 /// SDR ile çözücü arasında bekleyebilecek en fazla IQ bloğu.
 const QUEUE_BLOCKS: usize = 64;
+/// Çözücü ile oynatıcı arasında bekleyebilecek en fazla TS parçası.
+const TS_QUEUE_CHUNKS: usize = 1024;
 
 #[derive(Default, Clone)]
 pub struct DecoderStatus {
     pub stats: ReceiverStats,
     /// Oynatıcı sorunu ya da kapanması gibi bilgiler.
     pub player: Option<String>,
+    /// Oynatıcı yetişemediği için atlanan TS parçaları.
+    pub ts_dropped: u64,
 }
 
 /// Çalışan çözücüye bağlantı. Düşürüldüğünde çözücü ve oynatıcı kapanır.
@@ -40,40 +44,60 @@ pub fn spawn(cfg: ReceiverConfig, title: String) -> Decoder {
 
 fn run(cfg: ReceiverConfig, title: String, rx: Receiver<Vec<Complex<f32>>>, status: Arc<Mutex<DecoderStatus>>) {
     let mut receiver = DvbReceiver::new(cfg);
-    let mut player = match start_player(&title) {
-        Ok(child) => Some(child),
-        Err(e) => {
-            status.lock().unwrap().player = Some(e);
-            None
-        }
-    };
+    // TS ayrı bir iş parçacığıyla oynatıcıya yazılır: oynatıcı okumayı geciktirse de
+    // çözücü beklemez. Kuyruk dolarsa IQ değil TS atlanır.
+    let (ts_tx, ts_rx) = sync_channel::<Vec<u8>>(TS_QUEUE_CHUNKS);
+    let writer_status = Arc::clone(&status);
+    let writer = thread::spawn(move || write_to_player(&title, ts_rx, writer_status));
+
     let mut ts = Vec::new();
+    let mut ts_dropped = 0u64;
     while let Ok(block) = rx.recv() {
         ts.clear();
         receiver.process(&block, &mut ts);
         if !ts.is_empty() {
-            if let Some(child) = &mut player {
-                let ok = child.stdin.as_mut().is_some_and(|stdin| stdin.write_all(&ts).is_ok());
-                if !ok {
-                    status.lock().unwrap().player = Some("Video penceresi kapandı".into());
-                    let _ = child.kill();
-                    player = None;
-                }
+            match ts_tx.try_send(ts.clone()) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => ts_dropped += 1,
+                Err(TrySendError::Disconnected(_)) => {}
             }
         }
-        status.lock().unwrap().stats = receiver.stats.clone();
+        let mut st = status.lock().unwrap();
+        st.stats = receiver.stats.clone();
+        st.ts_dropped = ts_dropped;
     }
-    if let Some(mut child) = player {
-        let _ = child.kill();
-        let _ = child.wait();
+    drop(ts_tx);
+    let _ = writer.join();
+}
+
+fn write_to_player(title: &str, ts: Receiver<Vec<u8>>, status: Arc<Mutex<DecoderStatus>>) {
+    let mut child = match start_player(title) {
+        Ok(child) => child,
+        Err(e) => {
+            status.lock().unwrap().player = Some(e);
+            // Kuyruğu boşaltmaya devam et ki çözücü TS atladığını sanmasın.
+            while ts.recv().is_ok() {}
+            return;
+        }
+    };
+    while let Ok(chunk) = ts.recv() {
+        let ok = child.stdin.as_mut().is_some_and(|stdin| stdin.write_all(&chunk).is_ok());
+        if !ok {
+            status.lock().unwrap().player = Some("Video penceresi kapandı".into());
+            break;
+        }
     }
+    let _ = child.kill();
+    let _ = child.wait();
+    while ts.recv().is_ok() {}
 }
 
 /// ffplay'i standart girdiden TS okuyacak şekilde başlatır.
 fn start_player(title: &str) -> Result<Child, String> {
     let exe = find_ffplay().ok_or("ffplay bulunamadı (FFmpeg kurulu ve PATH'te olmalı)")?;
     Command::new(exe)
-        .args(["-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-framedrop"])
+        // -infbuf: ffplay giriş tamponunu sınırlamaz, okumayı hiç durdurmaz.
+        .args(["-hide_banner", "-loglevel", "error", "-infbuf", "-framedrop"])
         .args(["-window_title", title, "-i", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
