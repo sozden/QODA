@@ -6,6 +6,8 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-30
+
 ### Added
 - Linux support: build instructions in the README and a CI job that builds and tests on Ubuntu 24.04.
   Tested live with a LibreSDR and an RTL-SDR (through WSL).
@@ -48,5 +50,6 @@ First release.
 - Windows package with SoapySDR, the RTL-SDR and HackRF drivers and libiio, in two variants:
   with and without FFmpeg. `qoda --diagnose` reports what the program finds.
 
-[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/sozden/QODA/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sozden/QODA/releases/tag/v0.1.0
