@@ -84,7 +84,7 @@ $pothosModules = Join-Path $PothosDir 'lib\SoapySDR\modules0.8'
 foreach ($f in 'rtlsdrSupport.dll', 'HackRFSupport.dll') { Copy-Required (Join-Path $pothosModules $f) $modules }
 
 # 4. Documents and licenses.
-foreach ($f in 'LICENSE', 'README.md', 'README.tr.md') { Copy-Required $f $stage }
+foreach ($f in 'LICENSE', 'README.md') { Copy-Required $f $stage }
 Copy-Required 'tools\windows\THIRD_PARTY_NOTICES.md' $stage
 $licenses = Join-Path $stage 'licenses'
 $pothosLicenses = Join-Path $PothosDir 'licenses'
