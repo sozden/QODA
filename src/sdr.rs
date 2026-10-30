@@ -343,6 +343,14 @@ impl Radio {
     }
 }
 
+/// Closes the device and opens it again with all settings. Used when the device rejects
+/// a setting while streaming: over USB/IP (WSL) the RTL-SDR stalls every control transfer
+/// once streaming has started, but opening it with the new settings still works.
+fn reopen(radio: Radio, device: &DeviceInfo, s: &Settings) -> Result<Radio, String> {
+    drop(radio);
+    Radio::open(device, s)
+}
+
 fn run(
     device: &DeviceInfo,
     mut s: Settings,
@@ -366,18 +374,24 @@ fn run(
             match commands.try_recv() {
                 Ok(Command::Tune(hz)) => {
                     s.if_hz = hz;
-                    radio.set_frequency(hz)?;
+                    if radio.set_frequency(hz).is_err() {
+                        radio = reopen(radio, device, &s)?;
+                    }
                     // Recording metadata holds a single frequency; close the recording when the frequency changes.
                     stop_recording(&mut recording);
                 }
                 Ok(Command::Gain(g)) => {
                     s.gain = g;
-                    radio.set_gain(g)?;
+                    if radio.set_gain(g).is_err() {
+                        radio = reopen(radio, device, &s)?;
+                    }
                 }
                 Ok(Command::SampleRate(rate)) => {
                     s.sample_rate = rate;
                     stop_recording(&mut recording);
-                    radio.set_sample_rate(rate)?;
+                    if radio.set_sample_rate(rate).is_err() {
+                        radio = reopen(radio, device, &s)?;
+                    }
                 }
                 Ok(Command::StartRecording { path, rf_hz }) => {
                     stop_recording(&mut recording);
