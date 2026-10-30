@@ -16,8 +16,19 @@
     V1.4.0 is downloaded from GitHub.
 
 .PARAMETER FfmpegDir
-    Folder with ffmpeg.exe and ffplay.exe to bundle. If omitted, FFmpeg is not
-    bundled and QODA uses an FFmpeg installed on the system.
+    A shared FFmpeg build (folder with bin\ffmpeg.exe, bin\ffplay.exe and the
+    DLLs) for the -ffmpeg zip. If omitted, $FfmpegBuild is downloaded from
+    BtbN/FFmpeg-Builds on GitHub.
+
+.PARAMETER FfmpegBuild
+    BtbN release asset name without .zip.
+
+.PARAMETER NoFfmpeg
+    Write only the zip without FFmpeg.
+
+.OUTPUTS
+    dist\QODA-<version>-windows-x64.zip (QODA uses an FFmpeg installed on the
+    system) and dist\QODA-<version>-windows-x64-ffmpeg.zip (FFmpeg bundled).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1
@@ -25,7 +36,9 @@
 param(
     [string]$PothosDir = 'C:\Program Files\PothosSDR',
     [string]$RtlSdrBlogDir = '',
-    [string]$FfmpegDir = ''
+    [string]$FfmpegDir = '',
+    [string]$FfmpegBuild = 'ffmpeg-n8.1-latest-win64-gpl-shared-8.1',
+    [switch]$NoFfmpeg
 )
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
@@ -70,14 +83,6 @@ foreach ($f in 'rtlsdr.dll', 'pthreadVC2.dll', 'msvcr100.dll') { Copy-Required (
 $pothosModules = Join-Path $PothosDir 'lib\SoapySDR\modules0.8'
 foreach ($f in 'rtlsdrSupport.dll', 'HackRFSupport.dll') { Copy-Required (Join-Path $pothosModules $f) $modules }
 
-if ($FfmpegDir) {
-    $ff = Join-Path $stage 'ffmpeg'
-    New-Item -ItemType Directory $ff | Out-Null
-    foreach ($f in 'ffmpeg.exe', 'ffplay.exe') { Copy-Required (Join-Path $FfmpegDir $f) $ff }
-    $ffVersion = (& (Join-Path $FfmpegDir 'ffmpeg.exe') -hide_banner -version | Select-Object -First 3) -join "`r`n"
-    Set-Content (Join-Path $ff 'README.txt') "FFmpeg bundled with QODA, licensed under GPL-3.0-or-later.`r`nSource: https://ffmpeg.org/download.html`r`n`r`n$ffVersion" -Encoding utf8
-}
-
 # 4. Belgeler ve lisanslar.
 foreach ($f in 'LICENSE', 'README.md', 'README.tr.md') { Copy-Required $f $stage }
 Copy-Required 'tools\windows\THIRD_PARTY_NOTICES.md' $stage
@@ -89,9 +94,34 @@ foreach ($dir in 'SoapySDR', 'SoapyRTLSDR', 'SoapyHackRF', 'rtl-sdr', 'hackRF', 
     Copy-Item $src (Join-Path $licenses $dir) -Recurse
 }
 
-# 5. Zip.
-$zipPath = Join-Path $dist "$name.zip"
-Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-Compress-Archive -Path $stage -DestinationPath $zipPath
-$size = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-Write-Host "Wrote $zipPath ($size MB)"
+# 5. FFmpeg'siz zip.
+function Write-Zip([string]$zipName) {
+    $zipPath = Join-Path $dist $zipName
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    Compress-Archive -Path $stage -DestinationPath $zipPath
+    $size = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    Write-Host "Wrote $zipPath ($size MB)"
+}
+Write-Zip "$name.zip"
+if ($NoFfmpeg) { return }
+
+# 6. FFmpeg'li zip: BtbN'in paylaşımlı (DLL'li) GPL sürümü, 228 MB'lık statik sürümden çok daha küçük.
+if (-not $FfmpegDir) {
+    $tmp = Join-Path $env:TEMP 'qoda-ffmpeg'
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory $tmp | Out-Null
+    $zip = Join-Path $tmp 'ffmpeg.zip'
+    Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$FfmpegBuild.zip" -OutFile $zip
+    Expand-Archive $zip -DestinationPath $tmp
+    $FfmpegDir = Join-Path $tmp $FfmpegBuild
+}
+$ffBin = if (Test-Path (Join-Path $FfmpegDir 'bin')) { Join-Path $FfmpegDir 'bin' } else { $FfmpegDir }
+$ff = Join-Path $stage 'ffmpeg'
+New-Item -ItemType Directory $ff | Out-Null
+foreach ($f in 'ffmpeg.exe', 'ffplay.exe') { Copy-Required (Join-Path $ffBin $f) $ff }
+Get-ChildItem $ffBin -Filter *.dll | Copy-Item -Destination $ff
+$ffLicense = Join-Path $FfmpegDir 'LICENSE.txt'
+if (Test-Path $ffLicense) { Copy-Item $ffLicense (Join-Path $ff 'LICENSE.txt') }
+$ffVersion = (& (Join-Path $ff 'ffmpeg.exe') -hide_banner -version | Select-Object -First 3) -join "`r`n"
+Set-Content (Join-Path $ff 'README.txt') "FFmpeg bundled with QODA, licensed under GPL-3.0-or-later.`r`nBuild: https://github.com/BtbN/FFmpeg-Builds`r`nSource: https://ffmpeg.org/download.html`r`n`r`n$ffVersion" -Encoding utf8
+Write-Zip "$name-ffmpeg.zip"

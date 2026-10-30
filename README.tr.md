@@ -25,9 +25,10 @@ QPSK, 8PSK ve 16APSK yayınlar destekleniyor (pilotlu/pilotsuz, normal/kısa çe
 
 ## Windows'ta kurulum
 
-1. Sürümler sayfasından `QODA-<sürüm>-windows-x64.zip` dosyasını indirip istediğiniz bir yere açın.
-2. Video ve ses için FFmpeg'i kurun: `winget install Gyan.FFmpeg` (ya da `ffmpeg.exe` ve `ffplay.exe`'yi `qoda.exe`'nin yanına koyun).
-3. `qoda.exe`'yi çalıştırın.
+1. Sürümler sayfasından iki zip'ten birini indirip istediğiniz bir yere açın:
+   - `QODA-<sürüm>-windows-x64-ffmpeg.zip` FFmpeg'i içerir; başka bir şey kurmanız gerekmez.
+   - `QODA-<sürüm>-windows-x64.zip` daha küçüktür ve sistemde kurulu FFmpeg'i kullanır. Video ve ses için kurun: `winget install Gyan.FFmpeg`.
+2. `qoda.exe`'yi çalıştırın.
 
 Paket, RTL-SDR ve HackRF sürücüleriyle SoapySDR'ı ve Pluto/LibreSDR için libiio'yu zaten içerir; başka bir şey kurmak gerekmez. USB alıcılar için Windows'un olağan USB sürücüsü gerekir (RTL-SDR için Zadig ile kurulan WinUSB). Bir alıcı bulunamazsa `qoda.exe --diagnose > tani.txt` programın gördüklerini yazar.
 

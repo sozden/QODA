@@ -16,9 +16,11 @@ under GPL-3.0-or-later (see `LICENSE`).
 | libiio 0.19 (from PothosSDR 2021.07.25) | `libiio.dll` | LGPL-2.1-or-later | https://github.com/analogdevicesinc/libiio |
 | Microsoft Visual C++ runtime | `MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `msvcr100.dll` | Microsoft redistributable | https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist |
 
-If the package contains an `ffmpeg` folder, it also includes FFmpeg
-(`ffmpeg.exe`, `ffplay.exe`), licensed under GPL-3.0-or-later, source at
-https://ffmpeg.org/download.html and build details in `ffmpeg/README.txt`.
+If the package contains an `ffmpeg` folder (the `-ffmpeg` zip), it also
+includes FFmpeg (`ffmpeg.exe`, `ffplay.exe` and its DLLs), a shared GPL build
+from https://github.com/BtbN/FFmpeg-Builds, licensed under GPL-3.0-or-later.
+Source code is at https://ffmpeg.org/download.html; the license text is
+`ffmpeg/LICENSE.txt` and build details are in `ffmpeg/README.txt`.
 Otherwise QODA uses an FFmpeg installed on the system
 (for example `winget install Gyan.FFmpeg`).
 

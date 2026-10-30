@@ -25,9 +25,10 @@ QPSK, 8PSK and 16APSK broadcasts are supported, with or without pilots, in norma
 
 ## Installing on Windows
 
-1. Download `QODA-<version>-windows-x64.zip` from the releases page and extract it anywhere.
-2. Install FFmpeg for video and audio: `winget install Gyan.FFmpeg` (or put `ffmpeg.exe` and `ffplay.exe` next to `qoda.exe`).
-3. Run `qoda.exe`.
+1. Download one of the two zips from the releases page and extract it anywhere:
+   - `QODA-<version>-windows-x64-ffmpeg.zip` includes FFmpeg; nothing else to install.
+   - `QODA-<version>-windows-x64.zip` is smaller and uses an FFmpeg installed on the system. Install it for video and audio with `winget install Gyan.FFmpeg`.
+2. Run `qoda.exe`.
 
 The package already contains SoapySDR with the RTL-SDR and HackRF drivers and libiio for Pluto/LibreSDR; nothing else needs to be installed. USB receivers need their usual Windows USB driver (for an RTL-SDR, WinUSB installed with Zadig). If a receiver is not found, `qoda.exe --diagnose > diag.txt` writes what the program sees.
 
