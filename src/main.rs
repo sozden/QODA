@@ -27,6 +27,15 @@ fn use_bundled_soapy_modules() {
     }
 }
 
+/// Under WSL, the WSLg Wayland compositor drops the connection when the window is resized,
+/// which closes the program. Its X11 server (XWayland) does not, so Wayland is skipped there.
+fn prefer_x11_under_wsl() {
+    if cfg!(target_os = "linux") && std::env::var_os("WSL_DISTRO_NAME").is_some() && std::env::var_os("DISPLAY").is_some() {
+        // Set while there are no other threads yet.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
+}
+
 /// `qoda --diagnose`: checks the installation and writes the result to standard output
 /// (e.g. `qoda.exe --diagnose > diag.txt`).
 fn diagnose() {
@@ -50,6 +59,7 @@ fn diagnose() {
 
 fn main() -> eframe::Result {
     use_bundled_soapy_modules();
+    prefer_x11_under_wsl();
     if std::env::args().any(|a| a == "--diagnose") {
         diagnose();
         return Ok(());
