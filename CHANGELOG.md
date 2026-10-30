@@ -11,6 +11,10 @@ All notable changes to QODA are listed here. The format follows
   rules for USB receivers) and a `.tar.gz` for other distributions, built by `tools/linux/package.sh`
   and attached to tagged releases by CI. Also attached to the 0.1.1 release.
 
+### Fixed
+- Under WSL the program closed when the window was resized (WSLg's Wayland compositor drops the
+  connection); QODA now uses X11 there.
+
 ## [0.1.1] - 2026-10-30
 
 ### Added
