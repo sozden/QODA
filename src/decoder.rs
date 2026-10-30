@@ -197,9 +197,16 @@ fn background(mut cmd: Command) -> Command {
     cmd
 }
 
-/// FFmpeg aracını önce PATH'te, Windows'ta ayrıca winget'in kurulum klasöründe arar.
-fn find_ffmpeg_tool(tool: &str) -> Option<PathBuf> {
+/// FFmpeg aracını önce programın yanında (paketlenmiş sürüm), sonra PATH'te,
+/// Windows'ta ayrıca winget'in kurulum klasöründe arar.
+pub fn find_ffmpeg_tool(tool: &str) -> Option<PathBuf> {
     let name = if cfg!(windows) { format!("{tool}.exe") } else { tool.to_string() };
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        let bundled = [dir.join(&name), dir.join("ffmpeg").join(&name)].into_iter().find(|p| p.is_file());
+        if bundled.is_some() {
+            return bundled;
+        }
+    }
     let in_path = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())

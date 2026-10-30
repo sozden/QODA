@@ -23,6 +23,16 @@ Adı **QO**-100 ve **DA**TV'den gelir.
 
 QPSK, 8PSK ve 16APSK yayınlar destekleniyor (pilotlu/pilotsuz, normal/kısa çerçeve). 8PSK ve 16APSK sentetik DVB-S2 sinyalleriyle doğrulandı; testler sırasında yayında böyle bir istasyon yoktu. 32APSK ve BCH hata düzeltme henüz yok.
 
+## Windows'ta kurulum
+
+1. Sürümler sayfasından `QODA-<sürüm>-windows-x64.zip` dosyasını indirip istediğiniz bir yere açın.
+2. Video ve ses için FFmpeg'i kurun: `winget install Gyan.FFmpeg` (ya da `ffmpeg.exe` ve `ffplay.exe`'yi `qoda.exe`'nin yanına koyun).
+3. `qoda.exe`'yi çalıştırın.
+
+Paket, RTL-SDR ve HackRF sürücüleriyle SoapySDR'ı ve Pluto/LibreSDR için libiio'yu zaten içerir; başka bir şey kurmak gerekmez. USB alıcılar için Windows'un olağan USB sürücüsü gerekir (RTL-SDR için Zadig ile kurulan WinUSB). Bir alıcı bulunamazsa `qoda.exe --diagnose > tani.txt` programın gördüklerini yazar.
+
+Paket `tools/windows/package.ps1` ile oluşturulur.
+
 ## Gereksinimler
 
 - QO-100'e bakan bir çanak, LNB (yatay polarizasyon, 18 V) ve bir SDR alıcı. QO-100 DATV yayınları genelde 1.5 MS/s ve altında olduğu için RTL-SDR bile yeterli.

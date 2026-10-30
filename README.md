@@ -23,6 +23,16 @@ The name comes from **QO**-100 and **DA**TV.
 
 QPSK, 8PSK and 16APSK broadcasts are supported, with or without pilots, in normal or short frames. 8PSK and 16APSK are verified with synthetic DVB-S2 signals; no such broadcast was on air while testing. 32APSK and BCH error correction are not implemented yet.
 
+## Installing on Windows
+
+1. Download `QODA-<version>-windows-x64.zip` from the releases page and extract it anywhere.
+2. Install FFmpeg for video and audio: `winget install Gyan.FFmpeg` (or put `ffmpeg.exe` and `ffplay.exe` next to `qoda.exe`).
+3. Run `qoda.exe`.
+
+The package already contains SoapySDR with the RTL-SDR and HackRF drivers and libiio for Pluto/LibreSDR; nothing else needs to be installed. USB receivers need their usual Windows USB driver (for an RTL-SDR, WinUSB installed with Zadig). If a receiver is not found, `qoda.exe --diagnose > diag.txt` writes what the program sees.
+
+The package is built with `tools/windows/package.ps1`.
+
 ## Requirements
 
 - A dish pointed at QO-100, an LNB (horizontal polarisation, 18 V) and an SDR receiver. QO-100 DATV broadcasts are usually 1.5 MS/s or less, so even an RTL-SDR is enough.

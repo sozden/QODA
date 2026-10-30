@@ -70,6 +70,11 @@ impl Api {
     }
 }
 
+/// libiio yüklenebiliyor mu (tanılama için).
+pub fn library_status() -> Result<(), String> {
+    Api::load().map(|_| ())
+}
+
 fn cstr(s: &str) -> CString {
     CString::new(s).expect("NUL içermeyen metin")
 }

@@ -104,6 +104,42 @@ impl DeviceInfo {
     }
 }
 
+/// SoapySDR'ın arama klasörleri ve bulduğu modüller (tanılama için). Her modül
+/// için yükleyicinin sonucu: kaydettiği sürücüler ve varsa hata iletileri.
+pub fn soapy_modules() -> (Vec<String>, Vec<(String, String)>) {
+    use std::ffi::{CStr, CString};
+    unsafe {
+        let take = |list: *mut *mut std::os::raw::c_char, len: usize| -> Vec<String> {
+            let v = (0..len).map(|i| CStr::from_ptr(*list.add(i)).to_string_lossy().into_owned()).collect();
+            let mut list = list;
+            soapysdr_sys::SoapySDRStrings_clear(&mut list, len);
+            v
+        };
+        let mut len = 0;
+        let paths = take(soapysdr_sys::SoapySDR_listSearchPaths(&mut len), len);
+        soapysdr_sys::SoapySDR_loadModules();
+        let mut len = 0;
+        let modules = take(soapysdr_sys::SoapySDR_listModules(&mut len), len)
+            .into_iter()
+            .map(|path| {
+                let c = CString::new(path.clone()).unwrap_or_default();
+                let mut result = soapysdr_sys::SoapySDR_getLoaderResult(c.as_ptr());
+                let errors: Vec<String> = (0..result.size)
+                    .map(|i| {
+                        // Anahtar sürücü adı, değer hata iletisidir (boşsa sorunsuz).
+                        let key = CStr::from_ptr(*result.keys.add(i)).to_string_lossy();
+                        let val = CStr::from_ptr(*result.vals.add(i)).to_string_lossy();
+                        if val.is_empty() { format!("{key} ok") } else { format!("{key}: {val}") }
+                    })
+                    .collect();
+                soapysdr_sys::SoapySDRKwargs_clear(&mut result);
+                (path, errors.join("; "))
+            })
+            .collect();
+        (paths, modules)
+    }
+}
+
 /// Ses kartları dışındaki SoapySDR cihazlarını listeler.
 pub fn list_devices() -> Vec<DeviceInfo> {
     let Ok(found) = soapysdr::enumerate("") else {
