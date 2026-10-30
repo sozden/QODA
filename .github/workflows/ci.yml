@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install dependencies
-        run: brew install pkg-config soapysdr soapyrtlsdr soapyhackrf libiio ffmpeg
+        run: brew install pkg-config soapysdr soapyrtlsdr soapyhackrf ffmpeg
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build

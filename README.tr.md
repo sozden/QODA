@@ -8,6 +8,8 @@ Adı **QO**-100 ve **DA**TV'den gelir.
 
 [English](README.md)
 
+![QODA bir QO-100 DATV yayınını çözerken](docs/screenshot.png)
+
 ## Özellikler
 
 - RTL-SDR, HackRF ve diğer alıcılarla SoapySDR üzerinden, ADALM-Pluto / LibreSDR ile doğrudan libiio üzerinden çalışır (RTL-SDR, HackRF One ve Ethernet üzerinden LibreSDR ile denendi)
@@ -47,6 +49,18 @@ cargo build --release
 ```
 
 Rust yoksa [rustup](https://rustup.rs/) ile kurun. RTL-SDR'ı çekirdeğin DVB-T sürücüsü sahiplenmemeli: `SoapySDRUtil --find` onu göstermiyorsa `dvb_usb_rtl28xxu`'yu engelleyin (`echo blacklist dvb_usb_rtl28xxu | sudo tee /etc/modprobe.d/rtlsdr.conf`) ve alıcıyı çıkarıp takın. Pluto/LibreSDR `libiio0` kullanır.
+
+## macOS'ta kurulum
+
+macOS henüz gerçek alıcıyla denenmedi; CI'da Apple Silicon üzerinde derleniyor. [Homebrew](https://brew.sh/) ve [Rust](https://rustup.rs/) kurduktan sonra:
+
+```bash
+brew install pkg-config soapysdr soapyrtlsdr soapyhackrf ffmpeg
+cargo build --release
+./target/release/qoda
+```
+
+Pluto veya LibreSDR için libiio'yu [Analog Devices sürümlerinden](https://github.com/analogdevicesinc/libiio/releases) (`iio.framework`) kurun.
 
 ## Gereksinimler
 

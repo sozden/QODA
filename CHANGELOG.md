@@ -9,7 +9,8 @@ All notable changes to QODA are listed here. The format follows
 ### Added
 - Linux support: build instructions in the README and a CI job that builds and tests on Ubuntu 24.04.
   Tested live with a LibreSDR and an RTL-SDR (through WSL).
-- macOS CI build (not yet tested with hardware).
+- macOS build instructions and a CI build on Apple Silicon (not yet tested with hardware).
+- Screenshot in the README.
 
 ### Changed
 - Code comments and test messages are in English.
@@ -18,6 +19,8 @@ All notable changes to QODA are listed here. The format follows
 ### Fixed
 - When a receiver rejects a frequency, gain or sample rate change while streaming, QODA reopens it
   with the new settings instead of stopping. This happens with an RTL-SDR passed to WSL through USB/IP.
+- The frame counters showed empty boxes instead of ✓/✗, which the UI font cannot draw; they now read
+  "Frames OK" and "Frames lost".
 
 ## [0.1.0] - 2026-10-30
 
