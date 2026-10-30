@@ -34,3 +34,25 @@ jobs:
           path: |
             target/release/qoda
             target/release/qoda-analyze
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: brew install pkg-config soapysdr soapyrtlsdr soapyhackrf libiio ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Test
+        run: cargo test --release --locked
+      - name: Diagnose
+        run: ./target/release/qoda --diagnose
+      - name: Upload binaries
+        uses: actions/upload-artifact@v5
+        with:
+          name: qoda-macos-arm64
+          path: |
+            target/release/qoda
+            target/release/qoda-analyze

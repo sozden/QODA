@@ -38,7 +38,13 @@ impl Api {
         let names: &[&str] = if cfg!(windows) {
             &["libiio.dll", "iio.dll"]
         } else if cfg!(target_os = "macos") {
-            &["libiio.dylib", "iio.framework/iio"]
+            // Homebrew's lib folders are not on the default dlopen search path.
+            &[
+                "libiio.dylib",
+                "/opt/homebrew/lib/libiio.dylib",
+                "/usr/local/lib/libiio.dylib",
+                "/Library/Frameworks/iio.framework/iio",
+            ]
         } else {
             &["libiio.so.0", "libiio.so"]
         };
