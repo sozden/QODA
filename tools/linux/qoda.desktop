@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=QODA
+GenericName=QO-100 DATV Receiver
+Comment=Watch QO-100 DATV (DVB-S2) broadcasts with an SDR receiver
+Comment[tr]=QO-100 DATV (DVB-S2) yayınlarını SDR alıcıyla izleyin
+Exec=qoda
+Icon=qoda
+Terminal=false
+Categories=AudioVideo;HamRadio;Network;
+Keywords=QO-100;DATV;DVB-S2;SDR;RTL-SDR;HackRF;Pluto;

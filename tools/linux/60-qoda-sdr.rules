@@ -1,0 +1,8 @@
+# Lets the logged-in user open SDR receivers without root (QODA).
+# RTL2832U (RTL-SDR)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", TAG+="uaccess"
+# HackRF One
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089", TAG+="uaccess"
+# ADALM-Pluto (USB)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0456", ATTRS{idProduct}=="b673", TAG+="uaccess"

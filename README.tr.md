@@ -38,7 +38,15 @@ Paket `tools/windows/package.ps1` ile oluşturulur.
 
 ## Linux'ta kurulum
 
-Henüz Linux paketi yok; kaynaktan derlenir. Debian/Ubuntu'da (Ubuntu 24.04'te denendi):
+Ubuntu 24.04 ve üstü, Debian 13 ve bunlara dayanan dağıtımlarda sürümler sayfasından `qoda_<sürüm>_amd64.deb` dosyasını indirip kurun; apt SoapySDR'ı, RTL-SDR ve HackRF modüllerini, libiio'yu ve FFmpeg'i de kurar:
+
+```bash
+sudo apt install ./qoda_<sürüm>_amd64.deb
+```
+
+QODA uygulama menüsünde görünür ve USB alıcılar root olmadan çalışır. Diğer dağıtımlar için `QODA-<sürüm>-linux-x86_64.tar.gz` programı içerir; SoapySDR, libiio ve FFmpeg'i paket yöneticinizle kurun (içindeki `INSTALL.txt`'ye bakın).
+
+Debian/Ubuntu'da kaynaktan derlemek için:
 
 ```bash
 sudo apt install build-essential pkg-config libclang-dev libsoapysdr-dev \

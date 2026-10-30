@@ -6,6 +6,11 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Linux release files: a `.deb` package for Ubuntu 24.04+ / Debian 13 (with menu entry and udev
+  rules for USB receivers) and a `.tar.gz` for other distributions, built by `tools/linux/package.sh`
+  and attached to tagged releases by CI. Also attached to the 0.1.1 release.
+
 ## [0.1.1] - 2026-10-30
 
 ### Added

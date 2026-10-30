@@ -38,7 +38,15 @@ The package is built with `tools/windows/package.ps1`.
 
 ## Installing on Linux
 
-There is no Linux package yet; build from source. On Debian/Ubuntu (tested on Ubuntu 24.04):
+On Ubuntu 24.04 or newer, Debian 13 and derivatives, download `qoda_<version>_amd64.deb` from the releases page and install it; apt also installs SoapySDR, the RTL-SDR and HackRF modules, libiio and FFmpeg:
+
+```bash
+sudo apt install ./qoda_<version>_amd64.deb
+```
+
+QODA then appears in the application menu, and USB receivers work without root. For other distributions, `QODA-<version>-linux-x86_64.tar.gz` holds the program; install SoapySDR, libiio and FFmpeg with your package manager (see `INSTALL.txt` inside).
+
+To build from source on Debian/Ubuntu:
 
 ```bash
 sudo apt install build-essential pkg-config libclang-dev libsoapysdr-dev \
