@@ -230,7 +230,11 @@ pub static EN: Strings = Strings {
     warn_unsupported: "{} frames in an unsupported modulation",
     warn_iq_dropped: "{} IQ blocks dropped",
     warn_ts_dropped: "{} TS chunks dropped",
-    ffmpeg_missing: "FFmpeg not found. Install it with \"winget install Gyan.FFmpeg\" or put ffmpeg.exe and ffplay.exe next to qoda.exe",
+    ffmpeg_missing: if cfg!(windows) {
+        "FFmpeg not found. Install it with \"winget install Gyan.FFmpeg\" or put ffmpeg.exe and ffplay.exe next to qoda.exe"
+    } else {
+        "FFmpeg not found. Install it with your package manager, e.g. \"sudo apt install ffmpeg\""
+    },
     ffplay_missing: "ffplay not found, audio is off",
     player_start_failed: "Could not start {}: {}",
     player_closed: "Player closed",
@@ -325,7 +329,11 @@ pub static TR: Strings = Strings {
     warn_unsupported: "{} çerçeve desteklenmeyen modülasyonda",
     warn_iq_dropped: "{} IQ bloğu atlandı",
     warn_ts_dropped: "{} TS parçası atlandı",
-    ffmpeg_missing: "FFmpeg bulunamadı. \"winget install Gyan.FFmpeg\" ile kurun ya da ffmpeg.exe ve ffplay.exe'yi qoda.exe'nin yanına koyun",
+    ffmpeg_missing: if cfg!(windows) {
+        "FFmpeg bulunamadı. \"winget install Gyan.FFmpeg\" ile kurun ya da ffmpeg.exe ve ffplay.exe'yi qoda.exe'nin yanına koyun"
+    } else {
+        "FFmpeg bulunamadı. Paket yöneticinizle kurun, ör. \"sudo apt install ffmpeg\""
+    },
     ffplay_missing: "ffplay bulunamadı, ses kapalı",
     player_start_failed: "{} başlatılamadı: {}",
     player_closed: "Oynatıcı kapandı",

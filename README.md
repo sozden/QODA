@@ -34,6 +34,20 @@ The package already contains SoapySDR with the RTL-SDR and HackRF drivers and li
 
 The package is built with `tools/windows/package.ps1`.
 
+## Installing on Linux
+
+There is no Linux package yet; build from source. On Debian/Ubuntu (tested on Ubuntu 24.04):
+
+```bash
+sudo apt install build-essential pkg-config libclang-dev libsoapysdr-dev \
+  soapysdr-module-rtlsdr soapysdr-module-hackrf libiio0 ffmpeg \
+  libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+cargo build --release
+./target/release/qoda
+```
+
+Install Rust with [rustup](https://rustup.rs/) if needed. For an RTL-SDR, the kernel's DVB-T driver must not claim the stick: if `SoapySDRUtil --find` does not show it, blacklist `dvb_usb_rtl28xxu` (`echo blacklist dvb_usb_rtl28xxu | sudo tee /etc/modprobe.d/rtlsdr.conf`) and replug it. Pluto/LibreSDR use `libiio0`.
+
 ## Requirements
 
 - A dish pointed at QO-100, an LNB (horizontal polarisation, 18 V) and an SDR receiver. QO-100 DATV broadcasts are usually 1.5 MS/s or less, so even an RTL-SDR is enough.

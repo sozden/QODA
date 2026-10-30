@@ -34,6 +34,20 @@ Paket, RTL-SDR ve HackRF sürücüleriyle SoapySDR'ı ve Pluto/LibreSDR için li
 
 Paket `tools/windows/package.ps1` ile oluşturulur.
 
+## Linux'ta kurulum
+
+Henüz Linux paketi yok; kaynaktan derlenir. Debian/Ubuntu'da (Ubuntu 24.04'te denendi):
+
+```bash
+sudo apt install build-essential pkg-config libclang-dev libsoapysdr-dev \
+  soapysdr-module-rtlsdr soapysdr-module-hackrf libiio0 ffmpeg \
+  libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+cargo build --release
+./target/release/qoda
+```
+
+Rust yoksa [rustup](https://rustup.rs/) ile kurun. RTL-SDR'ı çekirdeğin DVB-T sürücüsü sahiplenmemeli: `SoapySDRUtil --find` onu göstermiyorsa `dvb_usb_rtl28xxu`'yu engelleyin (`echo blacklist dvb_usb_rtl28xxu | sudo tee /etc/modprobe.d/rtlsdr.conf`) ve alıcıyı çıkarıp takın. Pluto/LibreSDR `libiio0` kullanır.
+
 ## Gereksinimler
 
 - QO-100'e bakan bir çanak, LNB (yatay polarizasyon, 18 V) ve bir SDR alıcı. QO-100 DATV yayınları genelde 1.5 MS/s ve altında olduğu için RTL-SDR bile yeterli.
