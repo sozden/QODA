@@ -64,6 +64,15 @@ impl DeviceKind {
         }
     }
 
+    /// Cihaz türü değişince kullanılan kazanç (dB).
+    pub fn default_gain(self) -> f64 {
+        match self {
+            DeviceKind::Soapy => 30.0,
+            DeviceKind::HackRf => 44.0,
+            DeviceKind::Iio => 38.0,
+        }
+    }
+
     pub fn supports_auto_gain(self) -> bool {
         self != DeviceKind::HackRf
     }
@@ -425,6 +434,48 @@ mod tests {
         println!("RMS {rms:.4}, tepe {peak:.4}");
         let path = std::path::PathBuf::from(out);
         let mut rec = Recording::start(path, rate, rf_hz, if_hz).unwrap();
+        rec.write(&buf).unwrap();
+        rec.data.flush().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    /// Bağlı cihazların türlerini yazdırır: `cargo test --bin qoda listing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn print_device_kinds() {
+        for d in super::list_devices() {
+            println!("{:?} | {} | {}", d.kind, d.label, d.args);
+        }
+    }
+}
+
+#[cfg(test)]
+mod radio_tests {
+    use super::*;
+
+    /// Arayüzün kullandığı yolla (Radio + cihaz türü kazancı) kayıt:
+    /// `QODA_RADIO_OUT=yol cargo test --bin qoda radio_path -- --ignored`
+    #[test]
+    #[ignore]
+    fn radio_path_capture() {
+        let Some(out) = std::env::var_os("QODA_RADIO_OUT") else { return };
+        let device = list_devices().into_iter().next().expect("cihaz yok");
+        let kind = device.kind;
+        let rate = kind.default_rate() * 1e6;
+        // Yayını merkezin yanına koy (arayüzün ortalama ofseti).
+        let rf = 10_491.53e6 + kind.center_offset_mhz(1.8) * 1e6;
+        let s = Settings { if_hz: rf - 9_750e6, sample_rate: rate, gain: Some(kind.default_gain()), fft_size: 2048 };
+        let mut radio = Radio::open(&device, &s).unwrap();
+        let mut buf = vec![Complex::default(); (rate * 3.0) as usize];
+        let mut filled = 0;
+        while filled < buf.len() {
+            filled += radio.read(&mut buf[filled..]).unwrap();
+        }
+        let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
+        println!("{kind:?} {} MS/s, kazanç {} dB, tepe {peak:.3}", rate / 1e6, kind.default_gain());
+        let mut rec = Recording::start(std::path::PathBuf::from(out), rate, rf, s.if_hz).unwrap();
         rec.write(&buf).unwrap();
         rec.data.flush().unwrap();
     }

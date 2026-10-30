@@ -94,6 +94,8 @@ pub struct QodaApp {
     decoder: Option<Decoder>,
     video_tex: Option<TextureHandle>,
     video_seq: u64,
+    /// Ayarların en son uydurulduğu cihaz türü.
+    fitted_kind: Option<DeviceKind>,
     /// Süren kaydın yolu ve yazılan örnek sayısı.
     recording: Option<(std::path::PathBuf, u64)>,
 
@@ -145,6 +147,7 @@ impl QodaApp {
             video_tex: None,
             video_seq: 0,
             recording: None,
+            fitted_kind: None,
             last_frame: None,
             smoothed: Vec::new(),
             range: (-100.0, -40.0),
@@ -186,14 +189,17 @@ impl QodaApp {
         self.devices.get(self.device_index).map_or(DeviceKind::Soapy, |d| d.kind)
     }
 
-    /// Seçili cihaz değişince örnekleme hızını ve kazancı onun sınırlarına uydurur.
+    /// Örnekleme hızını ve kazancı seçili cihazın sınırlarına uydurur; cihaz türü
+    /// değiştiyse o türün varsayılan hızına ve kazancına geçer.
     fn fit_to_device(&mut self) {
         let kind = self.device_kind();
-        if !kind.sample_rates().contains(&self.sample_rate_ms) {
+        let changed = self.fitted_kind != Some(kind);
+        self.fitted_kind = Some(kind);
+        if changed || !kind.sample_rates().contains(&self.sample_rate_ms) {
             self.sample_rate_ms = kind.default_rate();
         }
         let (lo, hi) = kind.gain_range();
-        self.gain_db = self.gain_db.clamp(lo, hi);
+        self.gain_db = if changed { kind.default_gain() } else { self.gain_db.clamp(lo, hi) };
         if !kind.supports_auto_gain() {
             self.auto_gain = false;
         }
@@ -251,6 +257,7 @@ impl QodaApp {
     }
 
     fn start(&mut self, ctx: &egui::Context) {
+        self.fit_to_device();
         let Some(dev) = self.devices.get(self.device_index) else {
             return;
         };
@@ -309,6 +316,13 @@ impl QodaApp {
         self.stop_watch();
         if self.handle.is_none() {
             return;
+        }
+        // Yayın, alıcının DC tepesinin üstündeyse önce alıcıyı yana kaydır.
+        let half = self.occupied_khz() as f64 / 2000.0;
+        let offset = self.device_kind().center_offset_mhz(half * 2.0);
+        if offset > 0.0 && (self.selected_mhz - self.center_mhz).abs() < half + 0.1 {
+            self.center_mhz = ((self.selected_mhz + offset) * 1000.0).round() / 1000.0;
+            self.send(Command::Tune(self.if_hz()));
         }
         let cfg = ReceiverConfig {
             sample_rate: self.sample_rate_ms * 1e6,
@@ -596,6 +610,7 @@ impl QodaApp {
                 if ui.button(t.refresh).clicked() {
                     self.devices = all_devices(&self.network_devices);
                     self.device_index = self.device_index.min(self.devices.len().saturating_sub(1));
+                    self.fit_to_device();
                 }
                 if self.device_index != before {
                     self.fit_to_device();
