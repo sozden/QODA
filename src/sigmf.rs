@@ -1,4 +1,4 @@
-//! QODA'nın yazdığı SigMF kayıtlarını (cf32_le) okuma.
+//! SigMF kayıtlarını okuma (cf32_le ve ci16_le).
 
 use std::io;
 use std::path::Path;
@@ -17,22 +17,37 @@ pub struct Recording {
 pub fn read(path: &Path, max_samples: Option<usize>) -> io::Result<Recording> {
     let meta = std::fs::read_to_string(path.with_extension("sigmf-meta"))?;
     let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
-    if !meta.contains("\"cf32_le\"") {
-        return Err(invalid("only cf32_le recordings are supported"));
+    let float = meta.contains("\"cf32_le\"");
+    if !float && !meta.contains("\"ci16_le\"") {
+        return Err(invalid("only cf32_le and ci16_le recordings are supported"));
     }
     let sample_rate = number(&meta, "core:sample_rate").ok_or_else(|| invalid("core:sample_rate is missing"))?;
     let frequency = number(&meta, "core:frequency").unwrap_or(0.0);
 
     let bytes = std::fs::read(path.with_extension("sigmf-data"))?;
-    let mut samples: Vec<Complex<f32>> = bytes
-        .chunks_exact(8)
-        .map(|c| {
-            Complex::new(
-                f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-                f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-            )
-        })
-        .collect();
+    let mut samples: Vec<Complex<f32>> = if float {
+        bytes
+            .chunks_exact(8)
+            .map(|c| {
+                Complex::new(
+                    f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                    f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                )
+            })
+            .collect()
+    } else {
+        // ci16: tam ölçek ±32768.
+        let scale = 1.0 / 32768.0;
+        bytes
+            .chunks_exact(4)
+            .map(|c| {
+                Complex::new(
+                    i16::from_le_bytes([c[0], c[1]]) as f32 * scale,
+                    i16::from_le_bytes([c[2], c[3]]) as f32 * scale,
+                )
+            })
+            .collect()
+    };
     if let Some(max) = max_samples {
         samples.truncate(max);
     }

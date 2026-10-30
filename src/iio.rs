@@ -133,10 +133,12 @@ impl IioRadio {
         self.write(self.rx_lo, "frequency", &format!("{}", hz.round() as i64))
     }
 
-    /// Örnekleme hızıyla birlikte analog süzgeci de ayarlar.
+    /// Örnekleme hızıyla birlikte analog süzgeci de ayarlar. Süzgeç örnekleme
+    /// hızı kadar açılır: daha dar olunca bant kenarına yakın yayınların üstü
+    /// eğimli görünür ve ölçümleri bozulur.
     pub fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
         self.write(self.rx_config, "sampling_frequency", &format!("{}", rate.round() as i64))?;
-        let bandwidth = (rate * 0.9).max(200_000.0);
+        let bandwidth = rate.clamp(200_000.0, 40_000_000.0);
         self.write(self.rx_config, "rf_bandwidth", &format!("{}", bandwidth.round() as i64))
     }
 

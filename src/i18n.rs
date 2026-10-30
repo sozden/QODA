@@ -92,6 +92,9 @@ pub struct Strings {
     pub lnb_lo: &'static str,
     pub center_rf: &'static str,
     pub intermediate_frequency: &'static str,
+    pub wideband: &'static str,
+    pub wideband_tooltip: &'static str,
+    pub wideband_unavailable: &'static str,
 
     // Yayın
     pub frequency: &'static str,
@@ -199,6 +202,9 @@ pub static EN: Strings = Strings {
     lnb_lo: "LNB LO",
     center_rf: "Center RF",
     intermediate_frequency: "IF",
+    wideband: "Whole wideband transponder",
+    wideband_tooltip: "Switch to the highest sample rate and center on the QO-100 wideband transponder (10491–10499.5 MHz) to see all of it",
+    wideband_unavailable: "Needs a receiver that can sample at 10 MS/s or more (Pluto/LibreSDR over gigabit Ethernet)",
 
     frequency: "Frequency",
     symbol_rate: "Symbol rate",
@@ -291,6 +297,9 @@ pub static TR: Strings = Strings {
     lnb_lo: "LNB LO",
     center_rf: "Merkez RF",
     intermediate_frequency: "Ara frekans",
+    wideband: "Tüm geniş bant transponderi",
+    wideband_tooltip: "En yüksek örnekleme hızına geçip QO-100 geniş bant transponderinin (10491–10499.5 MHz) ortasına ayarla; transponderin tamamı görünür",
+    wideband_unavailable: "10 MS/s ve üstünde örnekleyebilen bir alıcı gerekir (gigabit Ethernet'te Pluto/LibreSDR)",
 
     frequency: "Frekans",
     symbol_rate: "Sembol hızı",

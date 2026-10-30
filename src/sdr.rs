@@ -33,10 +33,12 @@ pub enum DeviceKind {
 impl DeviceKind {
     /// Arayüzde sunulan örnekleme hızları (MS/s). AD9361 2.08 MS/s altına
     /// ek süzgeç olmadan inemez; RTL-SDR 2.4 MS/s üstünde örnek kaçırır.
+    /// 10–12 MS/s geniş bant transponderinin tamamını gösterir; gigabit Ethernet
+    /// gerektirir (100 Mbit bağlantıda 2.4 MS/s kullanılmalı).
     pub fn sample_rates(self) -> &'static [f64] {
         match self {
             DeviceKind::Soapy => &[1.024, 1.4, 2.048, 2.4],
-            DeviceKind::Iio => &[2.4, 3.0, 4.0],
+            DeviceKind::Iio => &[2.4, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0],
         }
     }
 

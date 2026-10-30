@@ -1,6 +1,6 @@
 //! Akış hâlinde DVB-S2 alıcı: IQ örnekleri parça parça girer, MPEG-TS çıkar.
 //!
-//! Zincir: frekans kaydırma → RRC eşleştirilmiş filtre → AGC → Gardner zamanlama →
+//! Zincir: frekans kaydırma → (gerekirse seyreltme) → RRC eşleştirilmiş filtre → AGC → Gardner zamanlama →
 //! PL başlık senkronu → karıştırma çözümü + taşıyıcı takibi + demap → LDPC → BCH →
 //! BBFRAME → TS. Senkron bulunduktan sonra her başlık beklenen konumda doğrulanır.
 
@@ -22,6 +22,8 @@ use super::timing::TimingRecovery;
 use crate::tsinfo::{ServiceInfo, TsInfo};
 
 const TIMING_BANDWIDTH: f64 = 0.005;
+/// Seyreltmeden sonra sembol başına en az bu kadar örnek kalır.
+const MIN_SAMPLES_PER_SYMBOL: f64 = 2.4;
 const CARRIER_BANDWIDTH: f32 = 0.005;
 const LDPC_MAX_ITERATIONS: usize = 50;
 /// LDPC çözümü için en fazla iş parçacığı.
@@ -124,10 +126,12 @@ fn spawn_ldpc_workers() -> (Sender<Job>, ChannelReceiver<Outcome>) {
 
 pub struct Receiver {
     cfg: ReceiverConfig,
-    mix_phase: f64,
-    mix_step: f64,
-    taps: Vec<f32>,
-    history: Vec<Complex<f32>>,
+    /// Frekans kaydırma osilatörü: her örnekte `osc_step` ile döner.
+    osc: Complex<f32>,
+    osc_step: Complex<f32>,
+    /// Giriş hızı yüksekse yayını sembol hızına yakın bir hıza indiren süzgeç.
+    decimator: Option<filters::StreamingFir>,
+    rrc: filters::StreamingFir,
     agc_power: Option<f32>,
     timing: TimingRecovery,
     symbols: Vec<Complex<f32>>,
@@ -155,14 +159,17 @@ pub struct Receiver {
 
 impl Receiver {
     pub fn new(cfg: ReceiverConfig) -> Self {
-        let sps = cfg.sample_rate / cfg.symbol_rate;
-        let taps = filters::rrc_taps(sps, cfg.rolloff, 8);
+        let decimation = ((cfg.sample_rate / (MIN_SAMPLES_PER_SYMBOL * cfg.symbol_rate)) as usize).max(1);
+        let sps = cfg.sample_rate / decimation as f64 / cfg.symbol_rate;
+        let decimator = (decimation > 1)
+            .then(|| filters::StreamingFir::new(filters::decimation_taps(decimation), decimation));
+        let rrc = filters::StreamingFir::new(filters::rrc_taps(sps, cfg.rolloff, 8), 1);
         let (jobs, outcomes) = spawn_ldpc_workers();
         Self {
-            mix_phase: 0.0,
-            mix_step: -TAU * cfg.offset_hz / cfg.sample_rate,
-            history: vec![Complex::default(); taps.len() - 1],
-            taps,
+            osc: Complex::new(1.0, 0.0),
+            osc_step: Complex::from_polar(1.0, (-TAU * cfg.offset_hz / cfg.sample_rate) as f32),
+            decimator,
+            rrc,
             agc_power: None,
             timing: TimingRecovery::new(sps, TIMING_BANDWIDTH),
             symbols: Vec::new(),
@@ -219,19 +226,28 @@ impl Receiver {
         }
     }
 
-    /// Frekans kaydırma, RRC filtre ve AGC.
+    /// Frekans kaydırma, seyreltme, RRC filtre ve AGC.
     fn front_end(&mut self, iq: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut buf = std::mem::take(&mut self.history);
-        buf.reserve(iq.len());
-        for s in iq {
-            buf.push(s * Complex::from_polar(1.0, self.mix_phase as f32));
-            self.mix_phase = (self.mix_phase + self.mix_step).rem_euclid(TAU);
-        }
-        let l = self.taps.len();
-        let mut out: Vec<Complex<f32>> = (0..buf.len() + 1 - l)
-            .map(|i| buf[i..i + l].iter().zip(&self.taps).map(|(x, &h)| x * h).sum())
+        let mixed: Vec<Complex<f32>> = iq
+            .iter()
+            .map(|s| {
+                let v = s * self.osc;
+                self.osc *= self.osc_step;
+                v
+            })
             .collect();
-        self.history = buf[buf.len() + 1 - l..].to_vec();
+        // Osilatörün genliği yuvarlama hatalarıyla kaymasın.
+        self.osc /= self.osc.norm();
+        let narrowed = match &mut self.decimator {
+            Some(d) => {
+                let mut out = Vec::with_capacity(mixed.len());
+                d.process(&mixed, &mut out);
+                out
+            }
+            None => mixed,
+        };
+        let mut out = Vec::with_capacity(narrowed.len());
+        self.rrc.process(&narrowed, &mut out);
 
         if !out.is_empty() {
             let p = out.iter().map(|z| z.norm_sqr()).sum::<f32>() / out.len() as f32;

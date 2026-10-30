@@ -32,6 +32,10 @@ const RESTART_DELAY: std::time::Duration = std::time::Duration::from_millis(500)
 const WHEEL_STEP_MHZ: f64 = 0.010;
 /// Yayın şeridi bu kadar spektrum karesinde bir yenilenir.
 const SCAN_EVERY_FRAMES: u32 = 12;
+/// QO-100 geniş bant transponderinin merkezi (10491–10499.5 MHz).
+const WIDEBAND_CENTER_MHZ: f64 = 10495.25;
+/// Geniş bant görünümü için gereken en düşük örnekleme hızı (MS/s).
+const WIDEBAND_MIN_RATE: f64 = 10.0;
 
 /// Renk paleti.
 mod palette {
@@ -189,6 +193,20 @@ impl QodaApp {
         }
         let (lo, hi) = kind.gain_range();
         self.gain_db = self.gain_db.clamp(lo, hi);
+    }
+
+    /// Geniş bant transponderinin tamamını göster: cihazın en yüksek hızına geç
+    /// ve transponderin ortasına ayarla.
+    fn wideband_view(&mut self, ctx: &egui::Context) {
+        let Some(&rate) = self.device_kind().sample_rates().last() else { return };
+        if rate < WIDEBAND_MIN_RATE {
+            return;
+        }
+        if self.sample_rate_ms != rate {
+            self.sample_rate_ms = rate;
+            self.send(Command::SampleRate(rate * 1e6));
+        }
+        self.retune(ctx, WIDEBAND_CENTER_MHZ);
     }
 
     fn add_network_device(&mut self) {
@@ -385,40 +403,14 @@ impl QodaApp {
         }
     }
 
-    /// Spektrumda tabanın belirgin üzerindeki bölgeleri bulup her birinin
-    /// parametrelerini tespit eder.
+    /// Görünen bantta bulunan yayınlar.
     fn scan_signals(&self) -> Vec<(f64, f32, f32)> {
-        let n = self.smoothed.len();
-        if n == 0 {
-            return Vec::new();
-        }
         let (center, span) = self.frame_span();
-        let mut sorted = self.smoothed.clone();
-        sorted.sort_by(f32::total_cmp);
-        let threshold = sorted[n / 10] + 6.0;
-        let min_width = n / 100;
-        let mut found: Vec<(f64, f32, f32)> = Vec::new();
-        let mut i = 0;
-        while i < n {
-            if self.smoothed[i] <= threshold {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < n && self.smoothed[i] > threshold {
-                i += 1;
-            }
-            if i - start < min_width {
-                continue;
-            }
-            let Some(d) = detect::detect(&self.smoothed, span * 1e6, (start + i) / 2) else { continue };
-            let mhz = center + d.center_offset_hz / 1e6;
-            if found.iter().all(|(f, _, _)| (f - mhz).abs() > 0.03) {
-                let rolloff = nearest_rolloff(d.rolloff);
-                found.push((mhz, (d.symbol_rate() / 1e3) as f32, rolloff));
-            }
-        }
-        found
+        detect::scan(&self.smoothed, span * 1e6)
+            .into_iter()
+            .filter(|d| !d.truncated)
+            .map(|d| (center + d.center_offset_hz / 1e6, (d.symbol_rate() / 1e3) as f32, nearest_rolloff(d.rolloff)))
+            .collect()
     }
 
     /// Son karenin RF merkezi ve genişliği (MHz).
@@ -659,6 +651,16 @@ impl QodaApp {
             ui.label(RichText::new(format!("{:.3} MHz", self.if_hz() / 1e6)).monospace().color(ACCENT));
             ui.end_row();
         });
+        let wide_capable = self.device_kind().sample_rates().last().is_some_and(|&r| r >= WIDEBAND_MIN_RATE);
+        let hover = if wide_capable { t.wideband_tooltip } else { t.wideband_unavailable };
+        if ui
+            .add_enabled(wide_capable, egui::Button::new(t.wideband).min_size(vec2(ui.available_width(), 26.0)))
+            .on_hover_text(hover)
+            .on_disabled_hover_text(hover)
+            .clicked()
+        {
+            self.wideband_view(ui.ctx());
+        }
         if retune {
             self.retune(ui.ctx(), self.center_mhz);
         }
@@ -891,8 +893,9 @@ impl QodaApp {
             db += 10.0;
         }
 
-        // Frekans ekseni: 250 kHz aralıklı işaretler.
-        let step = 0.25;
+        // Frekans ekseni: işaretler arası en az ~90 piksel olacak şekilde aralık seç.
+        let min_step = span_mhz * 90.0 / full.width().max(1.0) as f64;
+        let step = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0].into_iter().find(|&s| s >= min_step).unwrap_or(10.0);
         let mut f = ((frame_center - span_mhz / 2.0) / step).ceil() * step;
         let axis = Rect::from_min_max(pos2(full.left(), spec_rect.bottom()), pos2(full.right(), wf_rect.top()));
         painter.rect_filled(axis, CornerRadius::ZERO, BG);

@@ -24,6 +24,10 @@ struct Args {
     path: PathBuf,
     seconds: Option<f64>,
     symbol_rate: Option<f64>,
+    /// Çözülecek yayının RF frekansı (Hz); verilmezse kaydın ortası.
+    freq: Option<f64>,
+    /// Yalnızca kayıttaki yayınları listele.
+    scan: bool,
     rolloff: Option<f64>,
     /// Kaydı akış alıcısından parça parça geçir (canlı çözümü sınamak için).
     stream: bool,
@@ -33,7 +37,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, rolloff: None, stream: false, noise_db: None };
+    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, rolloff: None, stream: false, noise_db: None };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
@@ -41,15 +45,17 @@ fn parse_args() -> Result<Args, String> {
         match a.as_str() {
             "--seconds" => args.seconds = Some(num(it.next(), &a)?),
             "--rs" => args.symbol_rate = Some(num(it.next(), &a)? * 1e3),
+            "--freq" => args.freq = Some(num(it.next(), &a)? * 1e6),
             "--rolloff" => args.rolloff = Some(num(it.next(), &a)?),
             "--stream" => args.stream = true,
+            "--scan" => args.scan = true,
             "--noise" => args.noise_db = Some(num(it.next(), &a)?),
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}")),
             _ => args.path = PathBuf::from(a),
         }
     }
     if args.path.as_os_str().is_empty() {
-        return Err("usage: qoda-analyze <recording> [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]".into());
+        return Err("usage: qoda-analyze <recording> [--scan] [--freq MHz] [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]".into());
     }
     Ok(args)
 }
@@ -88,7 +94,22 @@ fn run() -> Result<(), String> {
     // 1. Spektrumdan yayının merkezini ve sembol hızını bul.
     let mut spectrum = Spectrum::new(4096);
     let db = spectrum.compute(&x[..x.len().min(fs as usize)]);
-    let found = detect::detect(&db, fs, db.len() / 2).ok_or("no broadcast found at the center of the recording")?;
+    let n = db.len();
+    if args.scan {
+        print_scan(&db, fs, rec.frequency);
+        return Ok(());
+    }
+    let guess = match args.freq {
+        Some(f) => {
+            let pos = (f - rec.frequency) / fs + 0.5;
+            if !(0.0..1.0).contains(&pos) {
+                return Err(format!("{:.3} MHz is outside the recording", f / 1e6));
+            }
+            (pos * n as f64) as usize
+        }
+        None => n / 2,
+    };
+    let found = detect::detect(&db, fs, guess).ok_or("no broadcast found at the selected frequency")?;
     let rs = args.symbol_rate.unwrap_or(found.symbol_rate());
     let rolloff = args.rolloff.unwrap_or(nearest_rolloff(found.rolloff));
     println!(
@@ -405,6 +426,21 @@ fn add_noise(x: &mut [Complex<f32>], db: f64) {
         let r = (-2.0 * u1.ln()).sqrt() * sigma;
         let th = std::f64::consts::TAU * u2;
         *z += Complex::new((r * th.cos()) as f32, (r * th.sin()) as f32);
+    }
+}
+
+/// Spektrumdaki bütün yayınları parametreleriyle yazdırır.
+fn print_scan(db: &[f32], fs: f64, center_hz: f64) {
+    println!("{:>12} {:>10} {:>9} {:>7}", "RF MHz", "kS/s", "roll-off", "SNR dB");
+    for d in detect::scan(db, fs) {
+        println!(
+            "{:>12.3} {:>10.1} {:>9.2} {:>7.1}{}",
+            (center_hz + d.center_offset_hz) / 1e6,
+            d.symbol_rate() / 1e3,
+            d.rolloff,
+            d.snr_db,
+            if d.truncated { "  (at the edge)" } else { "" }
+        );
     }
 }
 

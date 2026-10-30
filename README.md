@@ -12,7 +12,7 @@ The name comes from **QO**-100 and **DA**TV.
 
 - Works with RTL-SDR and other receivers through SoapySDR, and with ADALM-Pluto / LibreSDR directly through libiio (tested with RTL-SDR and LibreSDR over Ethernet)
 - Enter the LNB local oscillator and the broadcast frequency; the intermediate frequency is computed and the receiver is tuned automatically
-- Live spectrum and waterfall, with a strip of the broadcasts found in the visible band
+- Live spectrum and waterfall, with a strip of the broadcasts found in the visible band; with a Pluto/LibreSDR on gigabit Ethernet the whole wideband transponder (10491–10499.5 MHz) fits on one screen at 12 MS/s
 - Easy tuning: scroll or click individual frequency digits, scroll to move the selection, drag the spectrum to move the receiver
 - Automatic detection of the symbol rate, bandwidth and roll-off of a broadcast from the spectrum
 - A DVB-S2 decoder written from scratch in Rust, based on ETSI EN 302 307-1: frame sync, carrier and timing recovery, MODCOD (modulation and FEC) read from the frame header, parallel LDPC and BCH decoding, MPEG-TS output
@@ -62,12 +62,12 @@ The interface language can be changed from the selector at the top right. The la
 qoda-analyze recordings/<name>
 ```
 
-It prints the detected parameters, every frame header, the error-correction results and the service information, and writes the transport stream next to the recording as a `.ts` file. Options: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (decode with the same streaming receiver as the live view) and `--noise dB` (add white noise to test weak-signal reception).
+`--scan` lists every broadcast in the recording; `--freq MHz` picks one that is not at the center. It prints the detected parameters, every frame header, the error-correction results and the service information, and writes the transport stream next to the recording as a `.ts` file. Options: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (decode with the same streaming receiver as the live view) and `--noise dB` (add white noise to test weak-signal reception).
 
 ## How it works
 
 ```
-SDR ─► frequency shift ─► RRC matched filter ─► Gardner timing ─► PL header sync (SOF + PLS)
+SDR ─► frequency shift ─► decimation ─► RRC matched filter ─► Gardner timing ─► PL header sync (SOF + PLS)
     ─► descrambling + carrier PLL ─► QPSK soft demap ─► LDPC (parallel) ─► BCH ─► BBFRAME ─► MPEG-TS
     ─► ffmpeg (video) / ffplay (audio)
 ```

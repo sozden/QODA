@@ -56,6 +56,78 @@ pub fn filter(samples: &[Complex<f32>], taps: &[f32]) -> Vec<Complex<f32>> {
         .collect()
 }
 
+/// Parça parça gelen örneklere gerçek katsayılı FIR uygulayıp her `decimation`.
+/// çıkışı tutan akış süzgeci. Çıkış yalnızca tutulacak örnekler için
+/// hesaplanır; seyreltme maliyeti katsayı sayısı × çıkış hızıdır.
+pub struct StreamingFir {
+    taps: Vec<f32>,
+    decimation: usize,
+    history: Vec<Complex<f32>>,
+    /// Bir sonraki çıkış penceresinin `history` içindeki başlangıcı.
+    phase: usize,
+}
+
+impl StreamingFir {
+    pub fn new(taps: Vec<f32>, decimation: usize) -> Self {
+        let history = vec![Complex::default(); taps.len() - 1];
+        Self { taps, decimation: decimation.max(1), history, phase: 0 }
+    }
+
+    pub fn process(&mut self, input: &[Complex<f32>], out: &mut Vec<Complex<f32>>) {
+        let mut buf = std::mem::take(&mut self.history);
+        buf.extend_from_slice(input);
+        let l = self.taps.len();
+        let mut i = self.phase;
+        while i + l <= buf.len() {
+            out.push(dot(&buf[i..i + l], &self.taps));
+            i += self.decimation;
+        }
+        let keep = buf.len() + 1 - l;
+        self.phase = i - keep;
+        self.history = buf[keep..].to_vec();
+    }
+}
+
+/// Karmaşık örneklerle gerçek katsayıların iç çarpımı; dört ayrı toplayıcı
+/// işlemcinin aynı anda birden çok çarpma yapabilmesini sağlar.
+fn dot(x: &[Complex<f32>], h: &[f32]) -> Complex<f32> {
+    let mut acc = [Complex::<f32>::default(); 4];
+    let (xc, hc) = (x.chunks_exact(4), h.chunks_exact(4));
+    let (xr, hr) = (xc.remainder(), hc.remainder());
+    for (xs, hs) in xc.zip(hc) {
+        for k in 0..4 {
+            acc[k] += xs[k] * hs[k];
+        }
+    }
+    let mut sum = acc[0] + acc[1] + acc[2] + acc[3];
+    for (x, &h) in xr.iter().zip(hr) {
+        sum += x * h;
+    }
+    sum
+}
+
+/// `decimation` kat seyreltme öncesi alçak geçiren süzgeç: kesim yeni Nyquist
+/// frekansında, Blackman pencereli sinc, DC kazancı 1. Kesim ile yeni örnekleme
+/// hızı arasına katlanan bileşenler yayın bandının dışında kalır ve sonraki RRC
+/// süzgeci onları da bastırır.
+pub fn decimation_taps(decimation: usize) -> Vec<f32> {
+    let d = decimation.max(1) as f64;
+    let len = 12 * decimation.max(1) + 1;
+    let mid = (len / 2) as f64;
+    let cutoff = 0.5 / d; // örnekleme hızına göre
+    let taps: Vec<f64> = (0..len)
+        .map(|i| {
+            let n = i as f64 - mid;
+            let sinc = if n == 0.0 { 2.0 * cutoff } else { (2.0 * PI * cutoff * n).sin() / (PI * n) };
+            let w = 0.42 - 0.5 * (2.0 * PI * i as f64 / (len - 1) as f64).cos()
+                + 0.08 * (4.0 * PI * i as f64 / (len - 1) as f64).cos();
+            sinc * w
+        })
+        .collect();
+    let sum: f64 = taps.iter().sum();
+    taps.iter().map(|t| (t / sum) as f32).collect()
+}
+
 /// Örnekleri birim RMS güce ölçekler.
 pub fn normalize(samples: &mut [Complex<f32>]) {
     let power = samples.iter().map(|s| s.norm_sqr() as f64).sum::<f64>() / samples.len().max(1) as f64;
@@ -131,6 +203,36 @@ mod tests {
         }
         let e: f32 = taps.iter().map(|x| x * x).sum();
         assert!((e - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn streaming_fir_matches_single_call() {
+        let x: Vec<Complex<f32>> = (0..1000).map(|n| Complex::new((n as f32 * 0.37).sin(), (n as f32 * 0.11).cos())).collect();
+        let taps = decimation_taps(3);
+        let mut whole = Vec::new();
+        StreamingFir::new(taps.clone(), 3).process(&x, &mut whole);
+        let mut parts = Vec::new();
+        let mut fir = StreamingFir::new(taps, 3);
+        for chunk in x.chunks(77) {
+            fir.process(chunk, &mut parts);
+        }
+        assert_eq!(whole.len(), parts.len());
+        assert!(whole.iter().zip(&parts).all(|(a, b)| (a - b).norm() < 1e-5));
+    }
+
+    #[test]
+    fn decimation_filter_passes_low_and_blocks_high_tones() {
+        let d = 8;
+        let tone = |f: f64| -> f32 {
+            let x: Vec<Complex<f32>> = (0..20_000).map(|n| Complex::from_polar(1.0, (2.0 * PI * f * n as f64) as f32)).collect();
+            let mut out = Vec::new();
+            StreamingFir::new(decimation_taps(d), d).process(&x, &mut out);
+            let tail = &out[out.len() / 2..];
+            (tail.iter().map(|z| z.norm_sqr()).sum::<f32>() / tail.len() as f32).sqrt()
+        };
+        // Yeni Nyquist frekansı 1/16; yayın bandı bunun yarısına kadar, katlanan bölge 3/16'dan sonra.
+        assert!(tone(0.02) > 0.95, "geçirme bandı");
+        assert!(tone(0.25) < 0.01, "durdurma bandı");
     }
 
     #[test]

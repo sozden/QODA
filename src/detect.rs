@@ -14,6 +14,14 @@ const COMMON_SYMBOL_RATES: [f64; 9] = [
 const SNAP_TOLERANCE: f64 = 0.06;
 /// Yayın sayılması için tabanın üzerinde gereken en az seviye (dB).
 const MIN_SNR_DB: f32 = 6.0;
+/// Spektrum bu genişlikte (Hz) yumuşatılır.
+const SMOOTH_HZ: f64 = 10e3;
+/// Bundan geniş bölgeler yayın değil (ör. transponderin gürültü tümseği).
+const MAX_SYMBOL_RATE: f64 = 5e6;
+/// Taban ararken spektrum bu genişlik (Hz) boyunca alçalmazsa vadiye ulaşılmış sayılır.
+const VALLEY_PATIENCE_HZ: f64 = 30e3;
+/// Taramada en fazla bu kadar yayın aranır.
+const MAX_SIGNALS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Detection {
@@ -39,48 +47,142 @@ impl Detection {
 }
 
 /// Ortalanmış dB spektrumunda `guess` kutusunu içeren yayını arar.
+///
+/// Ölçüm yereldir: yayının düz tepesi ve −3 dB kenarları bulunur, taban ise
+/// kenarlardan dışarı inilerek spektrumun alçalmayı bıraktığı vadilerden alınır
+/// (iki yanın yüksek olanı). Böylece geniş bantta transponderin gürültü tümseği
+/// ile bant dışı arasındaki fark ölçümü bozmaz.
 pub fn detect(db: &[f32], sample_rate: f64, guess: usize) -> Option<Detection> {
     let n = db.len();
     if n < 16 || guess >= n {
         return None;
     }
-    let s = moving_average(db, (n / 256).max(2));
     let bin_hz = sample_rate / n as f64;
+    let s = smooth(db, bin_hz);
+    detect_smoothed(&s, bin_hz, guess).map(|(d, _)| d)
+}
 
+/// Spektrumdaki bütün yayınları bulur: en güçlü noktadan başlayıp her bulunan
+/// yayının bandını işaretler ve kalan bölgede aramayı sürdürür. Sonuçlar
+/// frekansa göre sıralıdır.
+pub fn scan(db: &[f32], sample_rate: f64) -> Vec<Detection> {
+    let n = db.len();
+    if n < 16 {
+        return Vec::new();
+    }
+    let bin_hz = sample_rate / n as f64;
+    let s = smooth(db, bin_hz);
     let mut sorted = s.clone();
     sorted.sort_by(f32::total_cmp);
-    let floor = sorted[n / 10];
-    if s[guess] < floor + MIN_SNR_DB {
+    // Genel tabanın bile 6 dB üstünde olmayan noktalar aday değildir.
+    let min_level = sorted[n / 10] + MIN_SNR_DB;
+    let patience = valley_patience(bin_hz);
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
+    let mut covered = vec![false; n];
+    let mut found = Vec::new();
+    for i in order {
+        if s[i] < min_level || found.len() >= MAX_SIGNALS {
+            break;
+        }
+        if covered[i] {
+            continue;
+        }
+        let span = match detect_smoothed(&s, bin_hz, i) {
+            Some((d, span)) => {
+                // Eteğinden yeniden bulunan bir yayını ikinci kez sayma.
+                let duplicate = found.iter().any(|f: &Detection| {
+                    (f.center_offset_hz - d.center_offset_hz).abs() < f.measured_symbol_rate / 2.0
+                });
+                if !duplicate {
+                    found.push(d);
+                }
+                span
+            }
+            None => (i.saturating_sub(patience), (i + patience).min(n - 1)),
+        };
+        covered[span.0..=span.1].fill(true);
+    }
+    found.sort_by(|a, b| a.center_offset_hz.total_cmp(&b.center_offset_hz));
+    found
+}
+
+fn smooth(db: &[f32], bin_hz: f64) -> Vec<f32> {
+    moving_average(db, ((SMOOTH_HZ / bin_hz).round() as usize).max(2))
+}
+
+fn valley_patience(bin_hz: f64) -> usize {
+    ((VALLEY_PATIENCE_HZ / bin_hz).ceil() as usize).max(3)
+}
+
+/// Yumuşatılmış spektrumda tespit; yayının tabana kadar kapladığı kutularla birlikte.
+fn detect_smoothed(s: &[f32], bin_hz: f64, guess: usize) -> Option<(Detection, (usize, usize))> {
+    let n = s.len();
+    // Tepe seviyesi: önce tıklanan nokta, sonra −3 dB kenarları arasındaki üst çeyrek.
+    let mut plateau = s[guess];
+    let (mut left, mut right) = (0.0, 0.0);
+    for _ in 0..3 {
+        (left, right) = edges(s, guess, plateau - 3.0);
+        let (a, b) = (left as usize, (right.ceil() as usize).clamp(left as usize + 1, n));
+        let mut core = s[a..b].to_vec();
+        core.sort_by(f32::total_cmp);
+        plateau = core[core.len() * 3 / 4];
+    }
+    let measured = (right - left) * bin_hz;
+    if measured > MAX_SYMBOL_RATE || right - left < 3.0 {
         return None;
     }
 
-    // Tabanın belirgin üzerindeki bölgeyi bul, düz tepe seviyesini ortancadan al.
-    let threshold = floor + MIN_SNR_DB;
-    let (l, r) = walk(&s, guess, |v| v > threshold);
-    let mut core = s[l..=r].to_vec();
-    core.sort_by(f32::total_cmp);
-    let plateau = core[core.len() * 3 / 4];
-
-    let half = plateau - 3.0;
-    let (left, right) = edges(&s, guess, half);
-    let measured = (right - left) * bin_hz;
-    let near_floor = floor + 3.0;
-    let (fl, fr) = edges(&s, guess, near_floor);
+    let patience = valley_patience(bin_hz);
+    let (floor_left, end_left, valley_left) = valley(s, (left as usize).min(n - 1), -1, patience);
+    let (floor_right, end_right, valley_right) = valley(s, (right as usize).min(n - 1), 1, patience);
+    let floor = floor_left.max(floor_right);
+    let snr = plateau - floor;
+    if snr < MIN_SNR_DB {
+        return None;
+    }
+    let (fl, fr) = edges(s, guess, floor + 3.0);
     let rolloff = (((fr - fl) / (right - left)) as f32 - 1.0).clamp(0.0, 0.5);
-
     let common = COMMON_SYMBOL_RATES
         .iter()
         .copied()
         .find(|r| ((measured - r) / r).abs() <= SNAP_TOLERANCE);
 
-    Some(Detection {
+    let detection = Detection {
         center_offset_hz: ((left + right) / 2.0 - n as f64 / 2.0) * bin_hz,
         measured_symbol_rate: measured,
         common_symbol_rate: common,
         rolloff,
-        snr_db: plateau - floor,
-        truncated: fl <= 0.5 || fr >= n as f64 - 1.5,
-    })
+        snr_db: snr,
+        truncated: end_left || end_right || fl <= 0.5 || fr >= n as f64 - 1.5,
+    };
+    // Yayının kapladığı alan vadilere kadar: tarama eteklerden yeniden başlamasın.
+    Some((detection, (valley_left, valley_right)))
+}
+
+/// `start`tan `dir` yönünde spektrum alçaldıkça ilerler; `patience` kutu boyunca
+/// yeni bir dip bulunmazsa durur. (dip seviyesi, dizinin sonuna ulaşıldı mı, dibin konumu)
+fn valley(s: &[f32], start: usize, dir: isize, patience: usize) -> (f32, bool, usize) {
+    let mut i = start as isize;
+    let (mut low, mut at) = (s[start], start);
+    let mut since = 0;
+    loop {
+        i += dir;
+        if i < 0 || i as usize >= s.len() {
+            return (low, true, at);
+        }
+        let v = s[i as usize];
+        if v < low - 0.3 {
+            (low, at) = (v, i as usize);
+            since = 0;
+        } else {
+            since += 1;
+            if since >= patience {
+                return (low, false, at);
+            }
+        }
+    }
 }
 
 /// Kutuların merkez konumuna göre (kesirli) sol ve sağ kesişim noktaları.
@@ -172,5 +274,29 @@ mod tests {
     fn noise_only_finds_nothing() {
         let db = vec![-60.0; 1024];
         assert_eq!(detect(&db, 2.048e6, 512), None);
+        assert!(scan(&db, 2.048e6).is_empty());
+    }
+
+    /// Geniş bant: bant dışı taban, 8 MHz'lik transponder tümseği ve içinde iki yayın.
+    #[test]
+    fn scan_finds_signals_inside_transponder_hump() {
+        let (n, fs) = (2048, 10e6);
+        let a = rc_spectrum(n, fs, -3.25e6, 1.5e6, 0.2, 18.0);
+        let b = rc_spectrum(n, fs, 1.0e6, 500e3, 0.2, 15.0);
+        let db: Vec<f32> = (0..n)
+            .map(|i| {
+                let f = ((i as f64 + 0.5) / n as f64 - 0.5) * fs;
+                let hump = if f.abs() < 4.0e6 { 7.0 } else { 0.0 };
+                // Doğrusal güçleri topla: taban 1, tümsek ve yayınlar onun üstünde.
+                let lin = 10f64.powf(hump / 10.0) + 10f64.powf(a[i] as f64 / 10.0) - 1.0 + 10f64.powf(b[i] as f64 / 10.0) - 1.0;
+                (10.0 * lin.log10() - 60.0) as f32
+            })
+            .collect();
+        let found = scan(&db, fs);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!((found[0].center_offset_hz + 3.25e6).abs() < 30e3, "{found:?}");
+        assert_eq!(found[0].common_symbol_rate, Some(1.5e6), "{found:?}");
+        assert!((found[1].center_offset_hz - 1.0e6).abs() < 30e3, "{found:?}");
+        assert_eq!(found[1].common_symbol_rate, Some(500e3), "{found:?}");
     }
 }
