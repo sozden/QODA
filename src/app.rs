@@ -9,7 +9,7 @@ use eframe::egui::{
 use crate::decoder::{self, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
 use crate::i18n::{Lang, Strings, fill};
 use crate::logo;
-use crate::sdr::{self, Command, DeviceInfo, Event, Frame, SdrError, Settings};
+use crate::sdr::{self, Command, DeviceInfo, DeviceKind, Event, Frame, SdrError, Settings};
 use crate::settings::UserSettings;
 use qoda::detect::{self, Detection};
 use qoda::dvbs2::plheader::Pls;
@@ -21,8 +21,6 @@ const FFT_SIZE: usize = 2048;
 const WATERFALL_ROWS: usize = 300;
 /// Spektrum çizgisinin üstel ortalama katsayısı.
 const SMOOTHING: f32 = 0.35;
-/// RTL-SDR için güvenli örnekleme hızları (MS/s).
-const SAMPLE_RATES: [f64; 4] = [1.024, 1.4, 2.048, 2.4];
 /// Kayıtların yazıldığı klasör (çalışma klasörüne göre).
 const RECORDINGS_DIR: &str = "recordings";
 const ROLLOFFS: [f32; 3] = [0.35, 0.25, 0.20];
@@ -67,6 +65,10 @@ pub struct QodaApp {
     lang: Lang,
     devices: Vec<DeviceInfo>,
     device_index: usize,
+    /// Eklenen ağ alıcılarının libiio URI'leri (kaydedilir).
+    network_devices: Vec<String>,
+    /// Ağ alıcısı ekleme kutusundaki metin.
+    network_input: String,
     handle: Option<sdr::Handle>,
     status: Status,
 
@@ -110,17 +112,19 @@ impl QodaApp {
         apply_theme(&cc.egui_ctx);
         let logo_image = ColorImage::from_rgba_unmultiplied([LOGO_PIXELS, LOGO_PIXELS], &logo::rgba(LOGO_PIXELS));
         let logo_tex = cc.egui_ctx.load_texture("logo", logo_image, TextureOptions::LINEAR);
-        let devices = sdr::list_devices();
+        let user = UserSettings::load();
+        let devices = all_devices(&user.network_devices);
         let device_index = devices
             .iter()
             .position(|d| d.args.contains("driver=rtlsdr"))
             .unwrap_or(0);
         let status = if devices.is_empty() { Status::NoDevice } else { Status::DevicesFound(devices.len()) };
-        let user = UserSettings::load();
         Self {
             lang: user.lang,
             devices,
             device_index,
+            network_devices: user.network_devices.clone(),
+            network_input: String::new(),
             handle: None,
             status,
             lo_mhz: user.lnb_lo_mhz,
@@ -154,7 +158,7 @@ impl QodaApp {
     }
 
     fn save_settings(&self) {
-        UserSettings { lang: self.lang, lnb_lo_mhz: self.lo_mhz }.save();
+        UserSettings { lang: self.lang, lnb_lo_mhz: self.lo_mhz, network_devices: self.network_devices.clone() }.save();
     }
 
     fn status_text(&self) -> String {
@@ -170,6 +174,37 @@ impl QodaApp {
             Status::Error(SdrError::RecordingWrite(e)) => fill(t.status_recording_write, &[e]),
             Status::NoSignal(mhz) => fill(t.status_no_signal, &[&format!("{mhz:.3}")]),
         }
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        self.devices.get(self.device_index).map_or(DeviceKind::Soapy, |d| d.kind)
+    }
+
+    /// Seçili cihaz değişince örnekleme hızını ve kazancı onun sınırlarına uydurur.
+    fn fit_to_device(&mut self) {
+        let kind = self.device_kind();
+        let rates = kind.sample_rates();
+        if !rates.contains(&self.sample_rate_ms) {
+            self.sample_rate_ms = if rates.contains(&2.4) { 2.4 } else { rates[0] };
+        }
+        let (lo, hi) = kind.gain_range();
+        self.gain_db = self.gain_db.clamp(lo, hi);
+    }
+
+    fn add_network_device(&mut self) {
+        let address = self.network_input.trim().to_string();
+        if address.is_empty() {
+            return;
+        }
+        let info = DeviceInfo::network(&address);
+        if !self.network_devices.contains(&info.args) {
+            self.network_devices.push(info.args.clone());
+            self.save_settings();
+        }
+        self.devices = all_devices(&self.network_devices);
+        self.device_index = self.devices.iter().position(|d| d.args == info.args).unwrap_or(0);
+        self.network_input.clear();
+        self.fit_to_device();
     }
 
     fn if_hz(&self) -> f64 {
@@ -197,7 +232,7 @@ impl QodaApp {
             fft_size: FFT_SIZE,
         };
         let ctx = ctx.clone();
-        self.handle = Some(sdr::spawn(dev.args.clone(), settings, move || ctx.request_repaint()));
+        self.handle = Some(sdr::spawn(dev.clone(), settings, move || ctx.request_repaint()));
         self.status = Status::Opened(dev.label.clone());
     }
 
@@ -546,6 +581,7 @@ impl QodaApp {
         ui.add_enabled_ui(!running, |ui| {
             ui.horizontal(|ui| {
                 let current = self.devices.get(self.device_index).map_or("—", |d| d.label.as_str());
+                let before = self.device_index;
                 egui::ComboBox::from_id_salt("device")
                     .width(ui.available_width() - 70.0)
                     .selected_text(current)
@@ -555,8 +591,21 @@ impl QodaApp {
                         }
                     });
                 if ui.button(t.refresh).clicked() {
-                    self.devices = sdr::list_devices();
+                    self.devices = all_devices(&self.network_devices);
                     self.device_index = self.device_index.min(self.devices.len().saturating_sub(1));
+                }
+                if self.device_index != before {
+                    self.fit_to_device();
+                }
+            });
+            ui.horizontal(|ui| {
+                let edit = egui::TextEdit::singleline(&mut self.network_input)
+                    .hint_text(t.network_hint)
+                    .desired_width(ui.available_width() - 70.0);
+                let response = ui.add(edit).on_hover_text(t.network_tooltip);
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button(t.add).clicked() || enter {
+                    self.add_network_device();
                 }
             });
         });
@@ -566,7 +615,7 @@ impl QodaApp {
             egui::ComboBox::from_id_salt("rate")
                 .selected_text(format!("{} MS/s", self.sample_rate_ms))
                 .show_ui(ui, |ui| {
-                    for r in SAMPLE_RATES {
+                    for &r in self.device_kind().sample_rates() {
                         ui.selectable_value(&mut self.sample_rate_ms, r, format!("{r} MS/s"));
                     }
                 });
@@ -582,8 +631,9 @@ impl QodaApp {
             let mut changed = ui.checkbox(&mut self.auto_gain, t.auto_gain).changed();
             ui.end_row();
             ui.label("");
+            let (gain_lo, gain_hi) = self.device_kind().gain_range();
             changed |= ui
-                .add_enabled(!self.auto_gain, egui::Slider::new(&mut self.gain_db, 0.0..=50.0).suffix(" dB"))
+                .add_enabled(!self.auto_gain, egui::Slider::new(&mut self.gain_db, gain_lo..=gain_hi).suffix(" dB"))
                 .changed();
             if changed {
                 self.send(Command::Gain(self.gain()));
@@ -1122,6 +1172,13 @@ fn nearest_rolloff(r: f32) -> f32 {
         .copied()
         .min_by(|a, b| (a - r).abs().total_cmp(&(b - r).abs()))
         .unwrap_or(0.35)
+}
+
+/// SoapySDR cihazları ile kaydedilmiş ağ alıcıları.
+fn all_devices(network: &[String]) -> Vec<DeviceInfo> {
+    let mut devices = sdr::list_devices();
+    devices.extend(network.iter().map(|uri| DeviceInfo::network(uri)));
+    devices
 }
 
 /// Çerçeve sinyalleşmesinin seçili dildeki tanımı, ör. "QPSK 4/5, normal frame, no pilots".

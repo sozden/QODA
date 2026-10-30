@@ -10,7 +10,7 @@ Adı **QO**-100 ve **DA**TV'den gelir.
 
 ## Özellikler
 
-- SoapySDR üzerinden yaygın SDR alıcılarla çalışır (RTL-SDR ile denendi; HackRF ve Pluto/LibreSDR'ın da çalışması beklenir)
+- RTL-SDR ve diğer alıcılarla SoapySDR üzerinden, ADALM-Pluto / LibreSDR ile doğrudan libiio üzerinden çalışır (RTL-SDR ve Ethernet üzerinden LibreSDR ile denendi)
 - LNB lokal osilatörü ve yayın frekansı girilir; ara frekans hesaplanır ve alıcı otomatik ayarlanır
 - Canlı spektrum ve şelale, görünen banttaki yayınların listelendiği bir şerit
 - Kolay ayar: frekans rakamlarını tek tek tekerlekle ya da tıklayarak değiştirme, tekerlekle seçimi kaydırma, spektrumu sürükleyerek alıcıyı kaydırma
@@ -41,7 +41,7 @@ Program `target/release/qoda`, komut satırı aracı `target/release/qoda-analyz
 
 ## Kullanım
 
-1. Cihazı seçip **Alıcıyı başlat**'a basın.
+1. Cihazı seçip **Alıcıyı başlat**'a basın. Ağdaki bir Pluto veya LibreSDR için cihaz listesinin altına IP adresini yazıp **Ekle**'ye basın; adres hatırlanır.
 2. **LNB LO** (ör. 9750 MHz) ve **Merkez RF** frekansını girin; ara frekans altlarında görünür.
 3. Spektrumda bir yayına tıklayın ya da üstteki **Yayınlar** şeridinden birini seçin. Sembol hızı ve roll-off tespit edilir, kapladığı bant vurgulanır. Çift tıklama alıcıyı o yayına ortalar.
 4. **▶ İzle**'ye basın. Yayın canlı olarak çözülür; video spektrumun üstünde görünür, **İzleme** kartında kilit durumu, MODCOD, SNR, çerçeve sayaçları ve servis adı gösterilir.

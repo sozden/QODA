@@ -5,6 +5,7 @@
 mod app;
 mod decoder;
 mod i18n;
+mod iio;
 mod logo;
 mod sdr;
 mod settings;

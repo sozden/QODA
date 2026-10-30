@@ -10,7 +10,7 @@ The name comes from **QO**-100 and **DA**TV.
 
 ## Features
 
-- Works with common SDR receivers through SoapySDR (tested with RTL-SDR; HackRF and Pluto/LibreSDR are expected to work)
+- Works with RTL-SDR and other receivers through SoapySDR, and with ADALM-Pluto / LibreSDR directly through libiio (tested with RTL-SDR and LibreSDR over Ethernet)
 - Enter the LNB local oscillator and the broadcast frequency; the intermediate frequency is computed and the receiver is tuned automatically
 - Live spectrum and waterfall, with a strip of the broadcasts found in the visible band
 - Easy tuning: scroll or click individual frequency digits, scroll to move the selection, drag the spectrum to move the receiver
@@ -41,7 +41,7 @@ The program is `target/release/qoda`, the command-line tool is `target/release/q
 
 ## Usage
 
-1. Select the device and press **Start receiver**.
+1. Select the device and press **Start receiver**. For a Pluto or LibreSDR on the network, type its IP address under the device list and press **Add**; it is remembered.
 2. Enter the **LNB LO** (e.g. 9750 MHz) and the **Center RF** frequency; the IF is shown below them.
 3. Click a broadcast in the spectrum, or pick one from the **Signals** strip above it. Its symbol rate and roll-off are detected and the occupied band is highlighted. Double-click centers the receiver on it.
 4. Press **▶ Watch**. The broadcast is decoded live; the video appears above the spectrum and the **Watch** card shows the lock state, MODCOD, SNR, frame counters and the service name.

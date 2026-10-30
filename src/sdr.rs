@@ -16,15 +16,54 @@ use soapysdr::Direction::Rx;
 
 use qoda::dsp::Spectrum;
 
+use crate::iio::IioRadio;
+
 /// Bir saniyede üretilecek yaklaşık spektrum karesi sayısı.
 const FRAMES_PER_SECOND: f64 = 25.0;
 
-/// SoapySDR'ın bulduğu bir alıcı.
+/// Alıcının hangi arka uçla sürüldüğü.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    /// SoapySDR (RTL-SDR, HackRF, ...).
+    Soapy,
+    /// libiio ile AD9361 tabanlı alıcılar (ADALM-Pluto, LibreSDR).
+    Iio,
+}
+
+impl DeviceKind {
+    /// Arayüzde sunulan örnekleme hızları (MS/s). AD9361 2.08 MS/s altına
+    /// ek süzgeç olmadan inemez; RTL-SDR 2.4 MS/s üstünde örnek kaçırır.
+    pub fn sample_rates(self) -> &'static [f64] {
+        match self {
+            DeviceKind::Soapy => &[1.024, 1.4, 2.048, 2.4],
+            DeviceKind::Iio => &[2.4, 3.0, 4.0],
+        }
+    }
+
+    /// Ayarlanabilir kazanç aralığı (dB).
+    pub fn gain_range(self) -> (f64, f64) {
+        match self {
+            DeviceKind::Soapy => (0.0, 50.0),
+            DeviceKind::Iio => (0.0, 71.0),
+        }
+    }
+}
+
+/// Seçilebilir bir alıcı.
 #[derive(Clone)]
 pub struct DeviceInfo {
     pub label: String,
-    /// `Device::new` için "anahtar=değer,..." biçiminde argümanlar.
+    /// SoapySDR için "anahtar=değer,..." argümanları, libiio için URI (ör. "ip:192.168.2.1").
     pub args: String,
+    pub kind: DeviceKind,
+}
+
+impl DeviceInfo {
+    /// Ağ üzerindeki bir Pluto/LibreSDR; `address` IP adresi ya da tam libiio URI'si.
+    pub fn network(address: &str) -> Self {
+        let uri = if address.contains(':') { address.to_string() } else { format!("ip:{address}") };
+        Self { label: format!("Pluto/LibreSDR ({uri})"), args: uri, kind: DeviceKind::Iio }
+    }
 }
 
 /// Ses kartları dışındaki SoapySDR cihazlarını listeler.
@@ -38,7 +77,7 @@ pub fn list_devices() -> Vec<DeviceInfo> {
         .map(|a| {
             let args = a.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
             let label = a.get("label").unwrap_or(&args).to_string();
-            DeviceInfo { label, args }
+            DeviceInfo { label, args, kind: DeviceKind::Soapy }
         })
         .collect()
 }
@@ -81,7 +120,7 @@ pub enum Event {
 /// SDR iş parçacığının hataları; metne arayüz kendi dilinde çevirir.
 #[derive(Debug, Clone)]
 pub enum SdrError {
-    /// Cihaz ya da SoapySDR hatası (kütüphanenin kendi iletisiyle).
+    /// Cihaz, SoapySDR ya da libiio hatası (kütüphanenin kendi iletisiyle).
     Device(String),
     RecordingOpen(String),
     RecordingWrite(String),
@@ -139,42 +178,92 @@ pub struct Handle {
 }
 
 /// İş parçacığını başlatır. `notify` her yeni olayda çağrılır (ör. arayüzü yeniden çizdirmek için).
-pub fn spawn(device_args: String, settings: Settings, notify: impl Fn() + Send + 'static) -> Handle {
+pub fn spawn(device: DeviceInfo, settings: Settings, notify: impl Fn() + Send + 'static) -> Handle {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (ev_tx, ev_rx) = mpsc::channel();
     thread::spawn(move || {
-        if let Err(e) = run(&device_args, settings, &cmd_rx, &ev_tx, &notify) {
-            let _ = ev_tx.send(Event::Error(SdrError::Device(e.to_string())));
+        if let Err(e) = run(&device, settings, &cmd_rx, &ev_tx, &notify) {
+            let _ = ev_tx.send(Event::Error(SdrError::Device(e)));
             notify();
         }
     });
     Handle { commands: cmd_tx, events: ev_rx }
 }
 
-fn apply_gain(dev: &soapysdr::Device, gain: Option<f64>) -> Result<(), soapysdr::Error> {
-    match gain {
-        Some(db) => {
-            dev.set_gain_mode(Rx, 0, false)?;
-            dev.set_gain(Rx, 0, db)
+/// İki arka ucu aynı biçimde kullanmak için alıcı.
+enum Radio {
+    Soapy { device: soapysdr::Device, stream: soapysdr::RxStream<Complex<f32>> },
+    Iio(IioRadio),
+}
+
+impl Radio {
+    fn open(info: &DeviceInfo, s: &Settings) -> Result<Self, String> {
+        let mut radio = match info.kind {
+            DeviceKind::Soapy => {
+                let device = soapysdr::Device::new(info.args.as_str()).map_err(|e| e.to_string())?;
+                let stream = device.rx_stream::<Complex<f32>>(&[0]).map_err(|e| e.to_string())?;
+                Radio::Soapy { device, stream }
+            }
+            DeviceKind::Iio => Radio::Iio(IioRadio::open(&info.args)?),
+        };
+        radio.set_sample_rate(s.sample_rate)?;
+        radio.set_frequency(s.if_hz)?;
+        radio.set_gain(s.gain)?;
+        if let Radio::Soapy { stream, .. } = &mut radio {
+            stream.activate(None).map_err(|e| e.to_string())?;
         }
-        None => dev.set_gain_mode(Rx, 0, true),
+        Ok(radio)
+    }
+
+    fn set_frequency(&mut self, hz: f64) -> Result<(), String> {
+        match self {
+            Radio::Soapy { device, .. } => device.set_frequency(Rx, 0, hz, ()).map_err(|e| e.to_string()),
+            Radio::Iio(r) => r.set_frequency(hz),
+        }
+    }
+
+    /// Akış durdurulmadan değiştirilir: bazı rtlsdr.dll sürümleri deactivate sırasında çöküyor.
+    fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
+        match self {
+            Radio::Soapy { device, .. } => device.set_sample_rate(Rx, 0, rate).map_err(|e| e.to_string()),
+            Radio::Iio(r) => r.set_sample_rate(rate),
+        }
+    }
+
+    fn set_gain(&mut self, gain: Option<f64>) -> Result<(), String> {
+        match self {
+            Radio::Soapy { device, .. } => {
+                let result = match gain {
+                    Some(db) => device.set_gain_mode(Rx, 0, false).and_then(|_| device.set_gain(Rx, 0, db)),
+                    None => device.set_gain_mode(Rx, 0, true),
+                };
+                result.map_err(|e| e.to_string())
+            }
+            Radio::Iio(r) => r.set_gain(gain),
+        }
+    }
+
+    /// Okunan örnek sayısı; taşma gibi geçici durumlarda 0.
+    fn read(&mut self, out: &mut [Complex<f32>]) -> Result<usize, String> {
+        match self {
+            Radio::Soapy { stream, .. } => match stream.read(&mut [out], 1_000_000) {
+                Ok(n) => Ok(n),
+                Err(e) if e.code == soapysdr::ErrorCode::Overflow => Ok(0),
+                Err(e) => Err(e.to_string()),
+            },
+            Radio::Iio(r) => r.read(out),
+        }
     }
 }
 
 fn run(
-    device_args: &str,
+    device: &DeviceInfo,
     mut s: Settings,
     commands: &Receiver<Command>,
     events: &Sender<Event>,
     notify: &dyn Fn(),
-) -> Result<(), soapysdr::Error> {
-    let dev = soapysdr::Device::new(device_args)?;
-    dev.set_sample_rate(Rx, 0, s.sample_rate)?;
-    dev.set_frequency(Rx, 0, s.if_hz, ())?;
-    apply_gain(&dev, s.gain)?;
-
-    let mut stream = dev.rx_stream::<Complex<f32>>(&[0])?;
-    stream.activate(None)?;
+) -> Result<(), String> {
+    let mut radio = Radio::open(device, &s)?;
     let mut spectrum = Spectrum::new(s.fft_size);
     let mut recording: Option<Recording> = None;
     let mut tap: Option<(SyncSender<Vec<Complex<f32>>>, Arc<AtomicU64>)> = None;
@@ -190,20 +279,18 @@ fn run(
             match commands.try_recv() {
                 Ok(Command::Tune(hz)) => {
                     s.if_hz = hz;
-                    dev.set_frequency(Rx, 0, hz, ())?;
+                    radio.set_frequency(hz)?;
                     // Kayıt meta verisi tek frekans içerir; frekans değişince kaydı kapat.
                     stop_recording(&mut recording);
                 }
                 Ok(Command::Gain(g)) => {
                     s.gain = g;
-                    apply_gain(&dev, g)?;
+                    radio.set_gain(g)?;
                 }
                 Ok(Command::SampleRate(rate)) => {
                     s.sample_rate = rate;
                     stop_recording(&mut recording);
-                    // Akışı durdurmadan değiştir: bazı rtlsdr.dll sürümleri
-                    // deactivate sırasında çöküyor.
-                    dev.set_sample_rate(Rx, 0, rate)?;
+                    radio.set_sample_rate(rate)?;
                 }
                 Ok(Command::StartRecording { path, rf_hz }) => {
                     stop_recording(&mut recording);
@@ -225,11 +312,7 @@ fn run(
         let mut samples = vec![Complex::default(); blocks * s.fft_size];
         let mut filled = 0;
         while filled < samples.len() {
-            match stream.read(&mut [&mut samples[filled..]], 1_000_000) {
-                Ok(n) => filled += n,
-                Err(e) if e.code == soapysdr::ErrorCode::Overflow => {}
-                Err(e) => return Err(e),
-            }
+            filled += radio.read(&mut samples[filled..])?;
         }
 
         if let Some((t, dropped)) = &tap {

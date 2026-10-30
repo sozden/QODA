@@ -10,11 +10,13 @@ use crate::i18n::Lang;
 pub struct UserSettings {
     pub lang: Lang,
     pub lnb_lo_mhz: f64,
+    /// Eklenen ağ alıcılarının libiio URI'leri.
+    pub network_devices: Vec<String>,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { lang: Lang::En, lnb_lo_mhz: 9750.0 }
+        Self { lang: Lang::En, lnb_lo_mhz: 9750.0, network_devices: Vec::new() }
     }
 }
 
@@ -40,6 +42,7 @@ impl UserSettings {
             match key.trim() {
                 "lang" => s.lang = Lang::from_code(value.trim()).unwrap_or(s.lang),
                 "lnb_lo_mhz" => s.lnb_lo_mhz = value.trim().parse().unwrap_or(s.lnb_lo_mhz),
+                "network_device" => s.network_devices.push(value.trim().to_string()),
                 _ => {}
             }
         }
@@ -52,6 +55,10 @@ impl UserSettings {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, format!("lang={}\nlnb_lo_mhz={}\n", self.lang.code(), self.lnb_lo_mhz));
+        let mut text = format!("lang={}\nlnb_lo_mhz={}\n", self.lang.code(), self.lnb_lo_mhz);
+        for uri in &self.network_devices {
+            text += &format!("network_device={uri}\n");
+        }
+        let _ = std::fs::write(p, text);
     }
 }

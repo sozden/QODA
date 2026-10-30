@@ -83,6 +83,9 @@ pub struct Strings {
 
     // Alıcı ve frekans
     pub refresh: &'static str,
+    pub network_hint: &'static str,
+    pub network_tooltip: &'static str,
+    pub add: &'static str,
     pub sample_rate: &'static str,
     pub gain: &'static str,
     pub auto_gain: &'static str,
@@ -187,6 +190,9 @@ pub static EN: Strings = Strings {
     card_recording: "RECORDING",
 
     refresh: "Refresh",
+    network_hint: "Pluto/LibreSDR IP, e.g. 192.168.2.1",
+    network_tooltip: "Add a Pluto or LibreSDR on the network by its IP address (or a libiio URI)",
+    add: "Add",
     sample_rate: "Sample rate",
     gain: "Gain",
     auto_gain: "Auto",
@@ -276,6 +282,9 @@ pub static TR: Strings = Strings {
     card_recording: "KAYIT",
 
     refresh: "Yenile",
+    network_hint: "Pluto/LibreSDR IP, ör. 192.168.2.1",
+    network_tooltip: "Ağdaki Pluto veya LibreSDR'ı IP adresiyle (ya da libiio URI'siyle) ekle",
+    add: "Ekle",
     sample_rate: "Örnekleme",
     gain: "Kazanç",
     auto_gain: "Otomatik",
