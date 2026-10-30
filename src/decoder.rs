@@ -187,13 +187,16 @@ fn start_audio() -> Result<Child, PlayerIssue> {
 }
 
 /// Stops the child process from opening its own console window on Windows.
+#[cfg(windows)]
 fn background(mut cmd: Command) -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn background(cmd: Command) -> Command {
     cmd
 }
 
