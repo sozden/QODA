@@ -1,4 +1,4 @@
-//! DVB-S2 alıcı parçaları (ETSI EN 302 307-1 temel alınarak).
+//! DVB-S2 receiver parts (based on ETSI EN 302 307-1).
 
 pub mod bbframe;
 pub mod fec;

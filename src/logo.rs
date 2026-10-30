@@ -1,13 +1,13 @@
-//! QODA logosu: `assets/qoda-logo.svg` ile aynı geometri, uzaklık alanlarıyla
-//! (kenar yumuşatmalı) yazılım içinde çizilir. Pencere simgesi ve üst bardaki
-//! logo bu çizimden üretilir; böylece ek görüntü dosyası gerekmez.
+//! QODA logo: the same geometry as `assets/qoda-logo.svg`, drawn in software with
+//! distance fields (anti-aliased). The window icon and the header logo are
+//! produced from this drawing, so no extra image file is needed.
 
-/// SVG'nin 256 birimlik koordinat sistemindeki geometri.
+/// Geometry in the SVG's 256-unit coordinate system.
 const VIEW: f32 = 256.0;
 const RING_CENTER: (f32, f32) = (124.0, 124.0);
 const RING_RADIUS: f32 = 70.0;
 const STROKE: f32 = 22.0;
-/// Q'nun kuyruğu halkanın içinden başlayıp halkayı keser; koyu kontur onu halkadan ayırır.
+/// The tail of the Q starts inside the ring and cuts through it; a dark outline separates it from the ring.
 const TAIL: ((f32, f32), (f32, f32)) = ((156.0, 156.0), (206.0, 206.0));
 const TAIL_OUTLINE: f32 = 6.0;
 const SATELLITE: (f32, f32) = (173.5, 74.5);
@@ -21,13 +21,13 @@ const CYAN: [f32; 3] = [56.0, 200.0, 240.0];
 const AMBER: [f32; 3] = [251.0, 191.0, 36.0];
 const WHITE: [f32; 3] = [230.0, 237.0, 247.0];
 
-/// `size × size` RGBA (önceden çarpılmamış) logo pikselleri.
+/// `size × size` RGBA (not premultiplied) logo pixels.
 pub fn rgba(size: usize) -> Vec<u8> {
     let scale = VIEW / size as f32;
     let mut out = Vec::with_capacity(size * size * 4);
     for py in 0..size {
         for px in 0..size {
-            // Piksel merkezi, SVG birimlerinde. Kenar yumuşatma genişliği bir piksel.
+            // Pixel centre in SVG units. Anti-aliasing width is one pixel.
             let (x, y) = ((px as f32 + 0.5) * scale, (py as f32 + 0.5) * scale);
             let cover = |sd: f32| (0.5 - sd / scale).clamp(0.0, 1.0);
 
@@ -69,21 +69,21 @@ fn ring(x: f32, y: f32) -> f32 {
     (circle(x, y, RING_CENTER) - RING_RADIUS).abs() - STROKE / 2.0
 }
 
-/// Doğru parçasına uzaklık.
+/// Distance to a line segment.
 fn capsule(x: f32, y: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     let (bax, bay) = (b.0 - a.0, b.1 - a.1);
     let t = (((x - a.0) * bax + (y - a.1) * bay) / (bax * bax + bay * bay)).clamp(0.0, 1.0);
     circle(x, y, (a.0 + t * bax, a.1 + t * bay))
 }
 
-/// Üçgene işaretli uzaklık (içeride negatif).
+/// Signed distance to a triangle (negative inside).
 fn triangle(x: f32, y: f32) -> f32 {
     let mut dist = f32::INFINITY;
     let mut inside = true;
     for i in 0..3 {
         let (a, b) = (PLAY[i], PLAY[(i + 1) % 3]);
         dist = dist.min(capsule(x, y, a, b));
-        // Köşeler saat yönünde (ekran koordinatları); içteki noktalar her kenarın aynı yanında.
+        // Vertices clockwise (screen coordinates); inner points are on the same side of every edge.
         let cross = (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
         inside &= cross <= 0.0;
     }
@@ -99,12 +99,12 @@ mod tests {
         let size = 64;
         let px = rgba(size);
         assert_eq!(px.len(), size * size * 4);
-        assert_eq!(px[3], 0, "sol üst köşe saydam olmalı");
+        assert_eq!(px[3], 0, "top-left corner should be transparent");
         let center = (size / 2 * size + size / 2) * 4;
         assert_eq!(px[center + 3], 255);
     }
 
-    /// Önizleme için: `QODA_LOGO_OUT=yol cargo test --bin qoda logo -- --ignored`
+    /// For a preview: `QODA_LOGO_OUT=path cargo test --bin qoda logo -- --ignored`
     #[test]
     #[ignore]
     fn export_preview() {

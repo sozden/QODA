@@ -1,9 +1,9 @@
-//! Canlı çözücü: SDR'dan gelen IQ bloklarını DVB-S2 alıcısından geçirir; çıkan
-//! MPEG-TS'yi görüntü için ffmpeg'e, ses için penceresiz ffplay'e aktarır.
+//! Live decoder: passes IQ blocks from the SDR through the DVB-S2 receiver and sends
+//! the resulting MPEG-TS to ffmpeg for video and to a windowless ffplay for audio.
 //!
-//! ffmpeg TS'yi çözüp sabit boyutlu ham RGBA kareler üretir; kareler arayüzde
-//! doku olarak gösterilir. Çözücü hiçbir oynatıcıyı beklemez: yazma işleri ayrı
-//! iş parçacıklarındadır ve kuyruk dolarsa IQ değil TS parçası atlanır.
+//! ffmpeg decodes the TS into fixed-size raw RGBA frames, which the UI shows as a
+//! texture. The decoder never waits for a player: writes happen on separate
+//! threads, and when a queue is full a TS chunk is dropped, never IQ.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -16,15 +16,15 @@ use std::thread;
 use num_complex::Complex;
 use qoda::dvbs2::receiver::{Receiver as DvbReceiver, ReceiverConfig, ReceiverStats};
 
-/// SDR ile çözücü arasında bekleyebilecek en fazla IQ bloğu.
+/// Maximum number of IQ blocks that may wait between the SDR and the decoder.
 const QUEUE_BLOCKS: usize = 64;
-/// Çözücü ile her oynatıcı arasında bekleyebilecek en fazla TS parçası.
+/// Maximum number of TS chunks that may wait between the decoder and each player.
 const TS_QUEUE_CHUNKS: usize = 1024;
-/// ffmpeg'in ürettiği kare boyutu; görüntü en-boy oranı korunarak sığdırılır.
+/// Frame size produced by ffmpeg; the picture is fitted keeping its aspect ratio.
 pub const VIDEO_WIDTH: usize = 1280;
 pub const VIDEO_HEIGHT: usize = 720;
 
-/// Oynatıcıyla ilgili sorunlar; metne arayüz kendi dilinde çevirir.
+/// Player problems; the UI turns them into text in its own language.
 #[derive(Debug, Clone)]
 pub enum PlayerIssue {
     FfmpegMissing,
@@ -37,27 +37,27 @@ pub enum PlayerIssue {
 pub struct DecoderStatus {
     pub stats: ReceiverStats,
     pub player: Option<PlayerIssue>,
-    /// Oynatıcılar yetişemediği için atlanan TS parçaları.
+    /// TS chunks dropped because the players could not keep up.
     pub ts_dropped: u64,
 }
 
-/// Son çözülen video karesi.
+/// Last decoded video frame.
 pub struct VideoFrame {
     pub rgba: Vec<u8>,
-    /// Her yeni karede artar; arayüz yalnızca değişince dokuyu günceller.
+    /// Increases with every new frame; the UI updates the texture only when it changes.
     pub seq: u64,
 }
 
-/// Çalışan çözücüye bağlantı. Düşürüldüğünde çözücü ve oynatıcılar kapanır.
+/// Handle to the running decoder. Dropping it shuts down the decoder and the players.
 pub struct Decoder {
     pub iq: SyncSender<Vec<Complex<f32>>>,
     pub status: Arc<Mutex<DecoderStatus>>,
-    /// SDR tarafında, çözücü yetişemediği için atlanan IQ blokları.
+    /// IQ blocks dropped on the SDR side because the decoder could not keep up.
     pub dropped: Arc<AtomicU64>,
     pub video: Arc<Mutex<Option<VideoFrame>>>,
 }
 
-/// `audio` false ise ses oynatıcısı başlatılmaz. `notify` her yeni karede çağrılır.
+/// If `audio` is false no audio player is started. `notify` is called on every new frame.
 pub fn spawn(cfg: ReceiverConfig, audio: bool, notify: impl Fn() + Send + 'static) -> Decoder {
     let (tx, rx) = sync_channel(QUEUE_BLOCKS);
     let status = Arc::new(Mutex::new(DecoderStatus::default()));
@@ -121,7 +121,7 @@ fn run(
     }
 }
 
-/// TS parçalarını bir oynatıcının standart girdisine yazan iş parçacığı.
+/// Thread that writes TS chunks to a player's standard input.
 fn spawn_writer(mut stdin: ChildStdin, status: Arc<Mutex<DecoderStatus>>) -> SyncSender<Arc<Vec<u8>>> {
     let (tx, rx) = sync_channel::<Arc<Vec<u8>>>(TS_QUEUE_CHUNKS);
     thread::spawn(move || {
@@ -131,14 +131,14 @@ fn spawn_writer(mut stdin: ChildStdin, status: Arc<Mutex<DecoderStatus>>) -> Syn
                 break;
             }
         }
-        // Gönderen taraf takılmasın diye kuyruğu boşaltmaya devam et.
+        // Keep draining the queue so the sender does not block.
         while rx.recv().is_ok() {}
     });
     tx
 }
 
-/// ffmpeg'i TS'den ham RGBA kare üretecek şekilde başlatır ve kareleri okuyan
-/// iş parçacığını kurar.
+/// Starts ffmpeg to produce raw RGBA frames from the TS and sets up the thread
+/// that reads the frames.
 fn start_video(
     video: Arc<Mutex<Option<VideoFrame>>>,
     notify: impl Fn() + Send + 'static,
@@ -174,7 +174,7 @@ fn start_video(
     Ok((child, stdin))
 }
 
-/// Sesi penceresiz ffplay ile çalar.
+/// Plays audio with a windowless ffplay.
 fn start_audio() -> Result<Child, PlayerIssue> {
     let exe = find_ffmpeg_tool("ffplay").ok_or(PlayerIssue::FfplayMissing)?;
     background(Command::new(exe))
@@ -186,7 +186,7 @@ fn start_audio() -> Result<Child, PlayerIssue> {
         .map_err(|e| PlayerIssue::StartFailed { program: "ffplay", error: e.to_string() })
 }
 
-/// Windows'ta alt sürecin kendi konsol penceresini açmasını engeller.
+/// Stops the child process from opening its own console window on Windows.
 fn background(mut cmd: Command) -> Command {
     #[cfg(windows)]
     {
@@ -197,8 +197,8 @@ fn background(mut cmd: Command) -> Command {
     cmd
 }
 
-/// FFmpeg aracını önce programın yanında (paketlenmiş sürüm), sonra PATH'te,
-/// Windows'ta ayrıca winget'in kurulum klasöründe arar.
+/// Looks for an FFmpeg tool next to the program first (packaged build), then in PATH,
+/// and on Windows also in winget's install folder.
 pub fn find_ffmpeg_tool(tool: &str) -> Option<PathBuf> {
     let name = if cfg!(windows) { format!("{tool}.exe") } else { tool.to_string() };
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {

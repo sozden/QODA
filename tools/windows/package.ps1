@@ -50,12 +50,12 @@ $dist = Join-Path $root 'dist'
 $stage = Join-Path $dist $name
 Write-Host "Packaging $name"
 
-# 1. Derleme (soapysdr-sys, SoapySDR.dll'i PATH'te arar).
+# 1. Build (soapysdr-sys looks for SoapySDR.dll in PATH).
 $env:Path = (Join-Path $PothosDir 'bin') + ';' + $env:Path
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 
-# 2. RTL-SDR Blog sürücüsü: PothosSDR'ın eski rtlsdr.dll'i akış durdurulurken çöküyor.
+# 2. RTL-SDR Blog driver: PothosSDR's old rtlsdr.dll crashes when the stream is stopped.
 if (-not $RtlSdrBlogDir) {
     $tmp = Join-Path $env:TEMP 'qoda-rtlsdrblog'
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -66,7 +66,7 @@ if (-not $RtlSdrBlogDir) {
     $RtlSdrBlogDir = Join-Path $tmp 'x64'
 }
 
-# 3. Dosyaları topla.
+# 3. Collect the files.
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 $modules = Join-Path $stage 'lib\SoapySDR\modules0.8'
 New-Item -ItemType Directory $modules -Force | Out-Null
@@ -83,7 +83,7 @@ foreach ($f in 'rtlsdr.dll', 'pthreadVC2.dll', 'msvcr100.dll') { Copy-Required (
 $pothosModules = Join-Path $PothosDir 'lib\SoapySDR\modules0.8'
 foreach ($f in 'rtlsdrSupport.dll', 'HackRFSupport.dll') { Copy-Required (Join-Path $pothosModules $f) $modules }
 
-# 4. Belgeler ve lisanslar.
+# 4. Documents and licenses.
 foreach ($f in 'LICENSE', 'README.md', 'README.tr.md') { Copy-Required $f $stage }
 Copy-Required 'tools\windows\THIRD_PARTY_NOTICES.md' $stage
 $licenses = Join-Path $stage 'licenses'
@@ -94,7 +94,7 @@ foreach ($dir in 'SoapySDR', 'SoapyRTLSDR', 'SoapyHackRF', 'rtl-sdr', 'hackRF', 
     Copy-Item $src (Join-Path $licenses $dir) -Recurse
 }
 
-# 5. FFmpeg'siz zip.
+# 5. Zip without FFmpeg.
 function Write-Zip([string]$zipName) {
     $zipPath = Join-Path $dist $zipName
     Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
@@ -105,7 +105,7 @@ function Write-Zip([string]$zipName) {
 Write-Zip "$name.zip"
 if ($NoFfmpeg) { return }
 
-# 6. FFmpeg'li zip: BtbN'in paylaşımlı (DLL'li) GPL sürümü, 228 MB'lık statik sürümden çok daha küçük.
+# 6. Zip with FFmpeg: BtbN's shared (DLL) GPL build, much smaller than the 228 MB static build.
 if (-not $FfmpegDir) {
     $tmp = Join-Path $env:TEMP 'qoda-ffmpeg'
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue

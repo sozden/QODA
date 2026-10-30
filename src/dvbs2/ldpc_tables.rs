@@ -1,7 +1,7 @@
-//! DVB-S2 LDPC eşlik biti biriktirici adresleri ve BCH polinomları.
+//! DVB-S2 LDPC parity bit accumulator addresses and BCH polynomials.
 //!
-//! ETSI EN 302 307-1, Ek B (n = 64800), Ek C (n = 16200) ve tablo 6a/6b.
-//! Bu dosya standart metninden `gen_tables.py` ile üretilmiştir; elle değiştirmeyin.
+//! ETSI EN 302 307-1, annex B (n = 64800), annex C (n = 16200) and tables 6a/6b.
+//! Generated from the standard's text by `tools/gen_ldpc_tables.py`; do not edit by hand.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
@@ -1578,7 +1578,7 @@ pub static SHORT_8_9: [&[u16]; 40] = [
     &[4, 1104, 1172],
 ];
 
-/// g1..g12 polinomlarının sıfırdan farklı terimlerinin üsleri.
+/// Exponents of the nonzero terms of polynomials g1..g12.
 pub static BCH_NORMAL: [&[u8]; 12] = [
     &[0, 2, 3, 5, 16],
     &[0, 1, 4, 5, 6, 8, 16],
@@ -1594,7 +1594,7 @@ pub static BCH_NORMAL: [&[u8]; 12] = [
     &[0, 1, 5, 6, 7, 9, 11, 12, 16],
 ];
 
-/// g1..g12 polinomlarının sıfırdan farklı terimlerinin üsleri.
+/// Exponents of the nonzero terms of polynomials g1..g12.
 pub static BCH_SHORT: [&[u8]; 12] = [
     &[0, 1, 3, 5, 14],
     &[0, 6, 8, 11, 14],

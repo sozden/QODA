@@ -1,13 +1,13 @@
-//! DVB-S2 fiziksel katman çerçeve başlığı (PLHEADER).
+//! DVB-S2 physical layer frame header (PLHEADER).
 //!
-//! ETSI EN 302 307-1, bölüm 5.5.2: her PLFRAME 90 sembollük bir başlıkla başlar.
-//! Başlık π/2-BPSK ile modüle edilir ve iki parçadan oluşur:
-//! - SOF (start of frame): sabit 26 bit, çerçeve başını bulmak için.
-//! - PLS kodu: 7 bitlik sinyalleşme (MODCOD 5 bit, TYPE 2 bit) bir (64,7)
-//!   kodla 64 bite genişletilip sabit bir diziyle karıştırılır.
+//! ETSI EN 302 307-1, clause 5.5.2: every PLFRAME starts with a 90-symbol header.
+//! The header is π/2-BPSK modulated and has two parts:
+//! - SOF (start of frame): fixed 26 bits, for finding the start of the frame.
+//! - PLS code: 7-bit signalling (MODCOD 5 bits, TYPE 2 bits) expanded to 64 bits
+//!   with a (64,7) code and scrambled with a fixed sequence.
 //!
-//! MODCOD modülasyonu ve FEC oranını, TYPE çerçeve boyutunu ve pilot
-//! sembollerinin varlığını verir; yani alıcı bu bilgileri başlıktan öğrenir.
+//! MODCOD gives the modulation and FEC rate, TYPE the frame size and whether
+//! pilot symbols are present; so the receiver learns these from the header.
 
 use std::f32::consts::FRAC_1_SQRT_2;
 
@@ -17,7 +17,7 @@ pub const HEADER_LEN: usize = 90;
 const SOF_LEN: usize = 26;
 const SOF_BITS: u32 = 0x18D_2E82;
 const PLS_SCRAMBLE: u64 = 0x719D_83C9_5342_2DFA;
-/// (64,7) kodun ilk 32 bitini üreten Reed-Muller satırları; en anlamlı bit önce gönderilir.
+/// Reed-Muller rows generating the first 32 bits of the (64,7) code; most significant bit sent first.
 const PLS_ROWS: [u32; 6] = [0x5555_5555, 0x3333_3333, 0x0F0F_0F0F, 0x00FF_00FF, 0x0000_FFFF, 0xFFFF_FFFF];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,10 +48,10 @@ impl Modulation {
     }
 }
 
-/// PLS kodundan çözülen sinyalleşme bilgisi.
+/// Signalling decoded from the PLS code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pls {
-    /// 0 = dummy çerçeve, 1..=28 DVB-S2 MODCOD'ları.
+    /// 0 = dummy frame, 1..=28 DVB-S2 MODCODs.
     pub modcod: u8,
     pub short_frame: bool,
     pub pilots: bool,
@@ -62,7 +62,7 @@ impl Pls {
         Self { modcod: code >> 2, short_frame: code & 2 != 0, pilots: code & 1 != 0 }
     }
 
-    /// Modülasyon ve FEC oranı (pay, payda). Dummy ve ayrılmış değerlerde `None`.
+    /// Modulation and FEC rate (numerator, denominator). `None` for dummy and reserved values.
     pub fn modulation_and_rate(&self) -> Option<(Modulation, (u8, u8))> {
         use Modulation::*;
         const TABLE: [(Modulation, (u8, u8)); 28] = [
@@ -76,7 +76,7 @@ impl Pls {
         TABLE.get((self.modcod as usize).checked_sub(1)?).copied()
     }
 
-    /// Çerçevedeki pilot bloğu sayısı (36 sembollük).
+    /// Number of pilot blocks (36 symbols each) in the frame.
     pub fn pilot_blocks(&self) -> usize {
         let Some((m, _)) = self.modulation_and_rate() else { return 0 };
         if !self.pilots {
@@ -86,7 +86,7 @@ impl Pls {
         (bits / m.bits_per_symbol() / 90 - 1) / 16
     }
 
-    /// Başlık dahil PLFRAME uzunluğu (sembol). Ayrılmış MODCOD'larda `None`.
+    /// PLFRAME length including the header (symbols). `None` for reserved MODCODs.
     pub fn frame_len(&self) -> Option<usize> {
         if self.modcod == 0 {
             return Some(HEADER_LEN + 36 * 90);
@@ -94,7 +94,7 @@ impl Pls {
         let (m, _) = self.modulation_and_rate()?;
         let bits = if self.short_frame { 16_200 } else { 64_800 };
         let slots = bits / m.bits_per_symbol() / 90;
-        // 16 yuvada bir 36 sembollük pilot bloğu (son yuvadan sonra yok).
+        // One 36-symbol pilot block every 16 slots (none after the last slot).
         let pilot_blocks = if self.pilots { (slots - 1) / 16 } else { 0 };
         Some(HEADER_LEN + slots * 90 + pilot_blocks * 36)
     }
@@ -110,7 +110,7 @@ impl Pls {
     }
 }
 
-/// 7 bitlik PLS değerinin karıştırılmış 64 bitlik kodu (en anlamlı bit önce).
+/// Scrambled 64-bit code of a 7-bit PLS value (most significant bit first).
 pub fn pls_codeword(code: u8) -> u64 {
     let six = code >> 1;
     let last = (code & 1) as u64;
@@ -128,14 +128,14 @@ pub fn pls_codeword(code: u8) -> u64 {
     c64 ^ PLS_SCRAMBLE
 }
 
-/// Başlığın `index`. sembolü (0 tabanlı) için π/2-BPSK eşlemesi.
+/// π/2-BPSK mapping for symbol `index` (0-based) of the header.
 fn pi2_bpsk(index: usize, bit: u8) -> Complex<f32> {
     let sign = if bit == 0 { FRAC_1_SQRT_2 } else { -FRAC_1_SQRT_2 };
-    // Standart 1 tabanlı sayar: tek indisler (1+j), çift indisler (-1+j).
+    // The standard counts from 1: odd indices (1+j), even indices (-1+j).
     if index % 2 == 0 { Complex::new(sign, sign) } else { Complex::new(-sign, sign) }
 }
 
-/// Belirli bir PLS değeri için 90 sembollük ideal başlık.
+/// Ideal 90-symbol header for a given PLS value.
 pub fn header_symbols(code: u8) -> [Complex<f32>; HEADER_LEN] {
     let cw = pls_codeword(code);
     std::array::from_fn(|i| {
@@ -148,30 +148,30 @@ pub fn header_symbols(code: u8) -> [Complex<f32>; HEADER_LEN] {
     })
 }
 
-/// Bulunan bir çerçeve başlığı.
+/// A frame header that was found.
 #[derive(Debug, Clone)]
 pub struct HeaderHit {
-    /// Başlığın ilk sembolünün indeksi.
+    /// Index of the header's first symbol.
     pub position: usize,
     pub pls: Pls,
-    /// SOF ilişkisinin normalize gücü (0..1).
+    /// Normalized strength of the SOF correlation (0..1).
     pub sof_metric: f32,
-    /// PLS kararının güveni: en iyi ile ikinci en iyi aday arasındaki fark (normalize).
+    /// Confidence of the PLS decision: margin between the best and second-best candidate (normalized).
     pub pls_margin: f32,
-    /// Başlık boyunca ölçülen frekans kayması (radyan/sembol).
+    /// Frequency offset measured over the header (radians/symbol).
     pub freq_rad_per_symbol: f32,
-    /// Başlığın ilk sembolündeki taşıyıcı fazı (radyan).
+    /// Carrier phase at the header's first symbol (radians).
     pub phase: f32,
-    /// Bilinen başlık sembollerinden ölçülen sembol başına SNR (dB).
+    /// Per-symbol SNR measured from the known header symbols (dB).
     pub snr_db: f32,
 }
 
-/// Başlık arama için önceden hesaplanan tablolar (referans SOF ve PLS kod kitabı).
+/// Precomputed tables for header search (reference SOF and PLS codebook).
 pub struct HeaderSearch {
     reference: [Complex<f32>; HEADER_LEN],
     ref_diff: Vec<Complex<f32>>,
     codebook: Vec<(u8, [f32; 64])>,
-    /// Her PLS kodu için başlığın 89 ardışık sembol farkı (eşlenikli).
+    /// The header's 89 consecutive symbol differences (conjugated) for each PLS code.
     header_diffs: Vec<[Complex<f32>; HEADER_LEN - 1]>,
 }
 
@@ -200,8 +200,8 @@ impl HeaderSearch {
         Self { reference, ref_diff, codebook, header_diffs }
     }
 
-    /// `p` konumunda başlayan SOF için normalize ilişki gücü ve ham ilişki.
-    /// `diff[k] = s[k+1]·conj(s[k])`; SOF'un i. farkı `diff[p + i - 1]`'dedir.
+    /// Normalized correlation strength and raw correlation for an SOF starting at `p`.
+    /// `diff[k] = s[k+1]·conj(s[k])`; the SOF's i-th difference is at `diff[p + i - 1]`.
     fn metric(&self, diff: &[Complex<f32>], p: usize) -> (f32, Complex<f32>) {
         let mut c = Complex::default();
         let mut norm = 0.0;
@@ -217,10 +217,10 @@ impl HeaderSearch {
         (1..symbols.len()).map(|k| symbols[k] * symbols[k - 1].conj()).collect()
     }
 
-    /// Sembol dizisinde SOF arayıp eşiği aşan her başlığın PLS kodunu çözer.
+    /// Searches a symbol sequence for SOFs and decodes the PLS code of each header above the threshold.
     ///
-    /// SOF, ardışık semboller arasındaki faz farkı (diferansiyel) üzerinden aranır;
-    /// bu sayede taşıyıcı fazı ve küçük frekans kaymaları aramayı etkilemez.
+    /// The SOF is searched for over the phase difference between consecutive symbols
+    /// (differentially), so the carrier phase and small frequency offsets do not affect the search.
     pub fn find_all(&self, symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> {
         let diff = Self::differences(symbols);
         let mut hits = Vec::new();
@@ -231,7 +231,7 @@ impl HeaderSearch {
                 p += 1;
                 continue;
             }
-            // Eşiği aşan bölgedeki en yüksek noktayı al.
+            // Take the highest point in the region above the threshold.
             let mut best = (p, m);
             for q in p + 1..(p + SOF_LEN).min(symbols.len() - HEADER_LEN) {
                 let (mq, _) = self.metric(&diff, q);
@@ -245,8 +245,8 @@ impl HeaderSearch {
         hits
     }
 
-    /// Penceredeki en güçlü SOF konumundaki başlığı çözer (kilitliyken doğrulama için).
-    /// `freq` verilirse başlıktan frekans tahmin edilmez, bu değer kullanılır.
+    /// Decodes the header at the strongest SOF position in the window (for verification while locked).
+    /// If `freq` is given, the frequency is not estimated from the header; this value is used.
     pub fn best(&self, symbols: &[Complex<f32>], freq: Option<f32>) -> Option<HeaderHit> {
         if symbols.len() <= HEADER_LEN {
             return None;
@@ -269,9 +269,9 @@ impl HeaderSearch {
         let w = match freq {
             Some(w) => w,
             None => {
-                // Kaba frekans: her PLS adayı için 89 sembol farkıyla ilişki; en güçlü
-                // aday seçilir. Bu ölçüt bir kodu tümleyeninden ayıramaz, o yüzden
-                // ince tahmin SOF ve PLS bölgelerinin kendi içindeki çiftlerle yapılır.
+                // Coarse frequency: correlation with the 89 symbol differences of each PLS
+                // candidate; the strongest candidate wins. This measure cannot tell a code from
+                // its complement, so the fine estimate uses pairs inside the SOF and PLS regions.
                 let hdiff = &diff[pos..pos + HEADER_LEN - 1];
                 let (code, acc) = self
                     .header_diffs
@@ -285,10 +285,10 @@ impl HeaderSearch {
         };
         let (code, pls_margin) = decode_pls(header, w, &self.reference[..SOF_LEN], &self.codebook);
         let ideal = header_symbols(code);
-        // Kod belli olunca 90 sembolün tamamıyla frekansı bir kez daha incelt.
+        // Once the code is known, refine the frequency once more with all 90 symbols.
         let w = if freq.is_some() { w } else { refine_frequency(header, &ideal, w, false) };
 
-        // Bilinen 90 sembolle SNR: genlik ve hata gücü.
+        // SNR from the 90 known symbols: amplitude and error power.
         let aligned = align(header, w, &ideal);
         let amp = aligned.iter().zip(&ideal).map(|(z, h)| (z * h.conj()).re).sum::<f32>() / HEADER_LEN as f32;
         let noise = aligned.iter().zip(&ideal).map(|(z, h)| (z - h * amp).norm_sqr()).sum::<f32>() / HEADER_LEN as f32;
@@ -306,10 +306,10 @@ impl HeaderSearch {
     }
 }
 
-/// Modülasyonu `ideal` ile kaldırıp frekansı artan gecikmelerle (10, 40 sembol)
-/// inceltir: gecikme büyüdükçe tahmin hassaslaşır, her adımın belirsizlik sınırı
-/// bir öncekinin hatasından geniş kalır. `split` true ise SOF ve PLS bölgelerini
-/// aşan çiftler kullanılmaz (kodun tümleyeni henüz ayırt edilmemişse).
+/// Removes the modulation with `ideal` and refines the frequency with growing lags
+/// (10, 40 symbols): the estimate gets finer as the lag grows, and each step's
+/// ambiguity limit stays wider than the previous step's error. If `split` is true,
+/// pairs crossing the SOF and PLS regions are not used (when the code's complement is not yet resolved).
 fn refine_frequency(header: &[Complex<f32>], ideal: &[Complex<f32>; HEADER_LEN], w0: f32, split: bool) -> f32 {
     let mut w = w0;
     for lag in [10usize, 40] {
@@ -330,13 +330,13 @@ fn refine_frequency(header: &[Complex<f32>], ideal: &[Complex<f32>; HEADER_LEN],
     w
 }
 
-/// Sembol dizisindeki tüm başlıkları arar; bkz. [`HeaderSearch::find_all`].
+/// Searches a symbol sequence for all headers; see [`HeaderSearch::find_all`].
 pub fn find_headers(symbols: &[Complex<f32>], threshold: f32) -> Vec<HeaderHit> {
     HeaderSearch::new().find_all(symbols, threshold)
 }
 
-/// Başlığın ilk sembolündeki taşıyıcı fazı; frekans kayması `w` çıkarıldıktan
-/// sonra bilinen ilk `known.len()` sembole göre ölçülür.
+/// Carrier phase at the header's first symbol, measured against the first
+/// `known.len()` known symbols after removing the frequency offset `w`.
 fn carrier_phase(header: &[Complex<f32>], w: f32, known: &[Complex<f32>]) -> f32 {
     let acc: Complex<f32> = header
         .iter()
@@ -347,7 +347,7 @@ fn carrier_phase(header: &[Complex<f32>], w: f32, known: &[Complex<f32>]) -> f32
     acc.arg()
 }
 
-/// Frekans kaymasını ve taşıyıcı fazını çıkarıp başlığı ideal sembollerle hizalar.
+/// Removes the frequency offset and carrier phase, aligning the header with the ideal symbols.
 fn align(header: &[Complex<f32>], w: f32, known: &[Complex<f32>]) -> Vec<Complex<f32>> {
     let phase = carrier_phase(header, w, known);
     header
@@ -357,10 +357,10 @@ fn align(header: &[Complex<f32>], w: f32, known: &[Complex<f32>]) -> Vec<Complex
         .collect()
 }
 
-/// PLS kodunu en yüksek ilişkili aday olarak seçer; (kod, güven payı) döndürür.
+/// Picks the PLS code as the most correlated candidate; returns (code, confidence margin).
 fn decode_pls(header: &[Complex<f32>], w: f32, known: &[Complex<f32>], codebook: &[(u8, [f32; 64])]) -> (u8, f32) {
     let aligned = align(header, w, known);
-    // π/2 dönüşünü geri al; gerçel kısım (1 - 2b) ile orantılı yumuşak bittir.
+    // Undo the π/2 rotation; the real part is a soft bit proportional to (1 - 2b).
     let soft: Vec<f32> = (0..64)
         .map(|i| {
             let k = SOF_LEN + i;
@@ -383,29 +383,29 @@ mod tests {
 
     #[test]
     fn frame_lengths_match_standard() {
-        // QPSK normal çerçeve: 360 yuva; pilotsuz 32490, pilotlu 22 blokla 33282 sembol.
+        // QPSK normal frame: 360 slots; 32490 symbols without pilots, 33282 with 22 pilot blocks.
         let qpsk_half = |pilots| Pls { modcod: 4, short_frame: false, pilots };
         assert_eq!(qpsk_half(false).frame_len(), Some(32_490));
         assert_eq!(qpsk_half(true).frame_len(), Some(33_282));
-        // 8PSK kısa çerçeve: 60 yuva, 3 pilot bloğu.
+        // 8PSK short frame: 60 slots, 3 pilot blocks.
         assert_eq!(Pls { modcod: 13, short_frame: true, pilots: true }.frame_len(), Some(90 + 60 * 90 + 3 * 36));
         assert_eq!(Pls { modcod: 0, short_frame: false, pilots: false }.frame_len(), Some(3330));
     }
 
     #[test]
     fn pls_codewords_are_far_apart() {
-        // (64,7) bi-ortogonal kod: farklı kodlar arasında en az 32 bit fark.
+        // (64,7) bi-orthogonal code: at least 32 bits differ between different codes.
         for a in 0u8..128 {
             for b in a + 1..128 {
                 let d = (pls_codeword(a) ^ pls_codeword(b)).count_ones();
-                assert!(d >= 32, "{a} ve {b} arası {d}");
+                assert!(d >= 32, "{d} between {a} and {b}");
             }
         }
     }
 
     #[test]
     fn finds_header_with_phase_and_frequency_offset() {
-        let code = (7 << 2) | 1; // QPSK 3/4, normal, pilotlu
+        let code = (7 << 2) | 1; // QPSK 3/4, normal, with pilots
         let header = header_symbols(code);
         let mut rng = crate::dvbs2::timing::tests::Lcg(3);
         let s = FRAC_1_SQRT_2;

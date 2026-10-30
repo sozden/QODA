@@ -1,7 +1,7 @@
-//! Kalıcı kullanıcı ayarları: basit `anahtar=değer` satırlarından oluşan bir dosya.
+//! Persistent user settings: a file of simple `key=value` lines.
 //!
-//! Windows'ta `%APPDATA%\QODA\settings.txt`, diğer sistemlerde
-//! `$XDG_CONFIG_HOME/qoda/settings.txt` ya da `~/.config/qoda/settings.txt`.
+//! `%APPDATA%\QODA\settings.txt` on Windows, on other systems
+//! `$XDG_CONFIG_HOME/qoda/settings.txt` or `~/.config/qoda/settings.txt`.
 
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ use crate::i18n::Lang;
 pub struct UserSettings {
     pub lang: Lang,
     pub lnb_lo_mhz: f64,
-    /// Eklenen ağ alıcılarının libiio URI'leri.
+    /// libiio URIs of added network receivers.
     pub network_devices: Vec<String>,
 }
 
@@ -31,7 +31,7 @@ fn path() -> Option<PathBuf> {
 }
 
 impl UserSettings {
-    /// Dosya yoksa veya okunamazsa varsayılanlar kullanılır.
+    /// Defaults are used if the file is missing or unreadable.
     pub fn load() -> Self {
         let mut s = Self::default();
         let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) else {
@@ -49,7 +49,7 @@ impl UserSettings {
         s
     }
 
-    /// Kaydetme hatası arayüzü etkilememeli; sessizce yok sayılır.
+    /// A save error must not affect the UI; it is silently ignored.
     pub fn save(&self) {
         let Some(p) = path() else { return };
         if let Some(dir) = p.parent() {

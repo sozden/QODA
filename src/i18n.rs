@@ -1,8 +1,8 @@
-//! Arayüz dilleri. Her dil, bütün arayüz metinlerini içeren bir [`Strings`]
-//! tablosudur; yeni bir dil eklemek için `EN` tablosunun bir kopyası çevrilir,
-//! [`Lang`]'e bir değer ve `strings`/`code`/`native_name` eşlemeleri eklenir.
+//! UI languages. Each language is a [`Strings`] table holding every UI text;
+//! to add a language, translate a copy of the `EN` table and add a value to
+//! [`Lang`] plus its `strings`/`code`/`native_name` mappings.
 //!
-//! `{}` içeren metinler [`fill`] ile sırayla doldurulan şablonlardır.
+//! Texts containing `{}` are templates filled in order with [`fill`].
 
 use std::fmt::Display;
 
@@ -22,7 +22,7 @@ impl Lang {
         }
     }
 
-    /// Ayar dosyasında kullanılan kod.
+    /// Code used in the settings file.
     pub fn code(self) -> &'static str {
         match self {
             Lang::En => "en",
@@ -34,7 +34,7 @@ impl Lang {
         Lang::ALL.into_iter().find(|l| l.code() == code)
     }
 
-    /// Dilin kendi dilindeki adı (seçicide gösterilir).
+    /// The language's name in that language (shown in the selector).
     pub fn native_name(self) -> &'static str {
         match self {
             Lang::En => "English",
@@ -43,7 +43,7 @@ impl Lang {
     }
 }
 
-/// Şablondaki `{}` yerlerini sırayla `args` ile doldurur.
+/// Fills the `{}` places of the template with `args` in order.
 pub fn fill(template: &str, args: &[&dyn Display]) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut args = args.iter();
@@ -64,7 +64,7 @@ pub struct Strings {
     pub app_subtitle: &'static str,
     pub yatolye_tooltip: &'static str,
 
-    // Üst bar
+    // Header
     pub broadcast_caps: &'static str,
     pub symbol_rate_caps: &'static str,
     pub service_caps: &'static str,
@@ -74,14 +74,14 @@ pub struct Strings {
     pub start_receiver: &'static str,
     pub stop_receiver: &'static str,
 
-    // Kart başlıkları
+    // Card titles
     pub card_receiver: &'static str,
     pub card_frequency: &'static str,
     pub card_broadcast: &'static str,
     pub card_watch: &'static str,
     pub card_recording: &'static str,
 
-    // Alıcı ve frekans
+    // Receiver and frequency
     pub refresh: &'static str,
     pub network_hint: &'static str,
     pub network_tooltip: &'static str,
@@ -96,7 +96,7 @@ pub struct Strings {
     pub wideband_tooltip: &'static str,
     pub wideband_unavailable: &'static str,
 
-    // Yayın
+    // Signal
     pub frequency: &'static str,
     pub symbol_rate: &'static str,
     pub rolloff: &'static str,
@@ -106,11 +106,11 @@ pub struct Strings {
     pub center: &'static str,
     pub center_tooltip: &'static str,
     pub broadcast_hint: &'static str,
-    /// {} = ölçülen sembol hızı (kS/s)
+    /// {} = measured symbol rate (kS/s)
     pub measured: &'static str,
     pub near_edge: &'static str,
 
-    // İzleme
+    // Watching
     pub audio: &'static str,
     pub not_watching: &'static str,
     pub locked: &'static str,
@@ -119,23 +119,23 @@ pub struct Strings {
     pub metric_frames_ok: &'static str,
     pub metric_frames_failed: &'static str,
     pub metric_ts_packets: &'static str,
-    /// {} = sayı
+    /// {} = count
     pub warn_cc: &'static str,
     pub warn_unsupported: &'static str,
     pub warn_iq_dropped: &'static str,
     pub warn_ts_dropped: &'static str,
     pub ffmpeg_missing: &'static str,
     pub ffplay_missing: &'static str,
-    /// {} = program adı, {} = hata
+    /// {} = program name, {} = error
     pub player_start_failed: &'static str,
     pub player_closed: &'static str,
 
-    // Kayıt
+    // Recording
     pub record: &'static str,
     pub stop_recording: &'static str,
     pub record_tooltip: &'static str,
 
-    // Video ve spektrum
+    // Video and spectrum
     pub video_waiting: &'static str,
     pub video_searching: &'static str,
     pub live: &'static str,
@@ -143,28 +143,28 @@ pub struct Strings {
     pub signals_none: &'static str,
     pub signal_tooltip: &'static str,
 
-    // Çerçeve ve akış tanımları
+    // Frame and stream descriptions
     pub frame_normal: &'static str,
     pub frame_short: &'static str,
     pub pilots_on: &'static str,
     pub pilots_off: &'static str,
     pub frame_dummy: &'static str,
-    /// {} = MODCOD numarası
+    /// {} = MODCOD number
     pub modcod_reserved: &'static str,
     pub stream_video: &'static str,
     pub stream_audio: &'static str,
     pub stream_data: &'static str,
 
-    // Durum çubuğu
+    // Status bar
     pub status_no_device: &'static str,
-    /// {} = cihaz sayısı
+    /// {} = number of devices
     pub status_devices: &'static str,
-    /// {} = cihaz adı
+    /// {} = device name
     pub status_opened: &'static str,
     pub status_stopped: &'static str,
-    /// {} = dosya yolu
+    /// {} = file path
     pub status_saved: &'static str,
-    /// {} = hata
+    /// {} = error
     pub status_error: &'static str,
     pub status_recording_open: &'static str,
     pub status_recording_write: &'static str,

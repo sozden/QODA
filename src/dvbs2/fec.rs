@@ -1,23 +1,23 @@
-//! DVB-S2 FEC parametreleri: MODCOD'a göre LDPC kodu ve BCH denetimi.
+//! DVB-S2 FEC parameters: LDPC code and BCH check by MODCOD.
 //!
-//! ETSI EN 302 307-1, tablo 5a/5b (parametreler) ve 6a/6b (BCH polinomları).
+//! ETSI EN 302 307-1, tables 5a/5b (parameters) and 6a/6b (BCH polynomials).
 
 use super::ldpc::{GROUP, LdpcCode};
 use super::ldpc_tables as t;
 
-/// Bir FEC çerçevesinin kodlama parametreleri.
+/// Coding parameters of an FEC frame.
 pub struct FecParams {
     pub n_ldpc: usize,
     pub k_ldpc: usize,
-    /// BBFRAME uzunluğu (bit).
+    /// BBFRAME length (bits).
     pub k_bch: usize,
-    /// BCH düzeltme kapasitesi.
+    /// BCH correction capability.
     pub t: usize,
     table: &'static [&'static [u16]],
 }
 
 impl FecParams {
-    /// Kod oranı (pay, payda) ve çerçeve boyutuna göre parametreler.
+    /// Parameters for a code rate (numerator, denominator) and frame size.
     pub fn new(rate: (u8, u8), short: bool) -> Option<Self> {
         #[rustfmt::skip]
         let (k_bch, k_ldpc, bch_t, table): (usize, usize, usize, &'static [&'static [u16]]) = match (short, rate) {
@@ -58,16 +58,16 @@ impl FecParams {
     }
 }
 
-/// BCH kodu: üreteç polinomu g(x) = g1(x)·…·gt(x) ile sözcük denetimi.
+/// BCH code: codeword check with the generator polynomial g(x) = g1(x)·…·gt(x).
 pub struct Bch {
-    /// g(x) katsayıları, en yüksek dereceli terim hariç; bit i = x^i.
+    /// Coefficients of g(x) without the highest-degree term; bit i = x^i.
     generator: Vec<u64>,
     degree: usize,
 }
 
 impl Bch {
     fn new(polys: &[&[u8]]) -> Self {
-        // GF(2) üzerinde polinom çarpımı; katsayılar bit dizisi olarak.
+        // Polynomial multiplication over GF(2); coefficients as bit arrays.
         let mut g = vec![1u8];
         for p in polys {
             let deg = *p.iter().max().unwrap() as usize;
@@ -93,9 +93,9 @@ impl Bch {
         self.degree
     }
 
-    /// Sözcük (ilk bit en yüksek dereceli katsayı) g(x)'e tam bölünüyor mu.
+    /// Whether the word (first bit is the highest-degree coefficient) is divisible by g(x).
     pub fn is_codeword(&self, bits: &[u8]) -> bool {
-        // Bit seri LFSR bölme: kalan register'da tutulur.
+        // Bit-serial LFSR division: the remainder is kept in the register.
         let words = self.generator.len();
         let top = self.degree - 1;
         let mut reg = vec![0u64; words];
@@ -124,10 +124,10 @@ mod tests {
 
     #[test]
     fn generator_degrees_match_parity_lengths() {
-        // BCH eşlik uzunluğu = N_bch - K_bch = 16·t (normal), 14·t (kısa).
+        // BCH parity length = N_bch - K_bch = 16·t (normal), 14·t (short).
         for (rate, short) in [((4, 5), false), ((2, 3), false), ((8, 9), false), ((1, 2), true)] {
             let p = FecParams::new(rate, short).unwrap();
-            assert_eq!(p.bch().parity_bits(), p.k_ldpc - p.k_bch, "{rate:?} kısa={short}");
+            assert_eq!(p.bch().parity_bits(), p.k_ldpc - p.k_bch, "{rate:?} short={short}");
         }
     }
 
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn bch_accepts_multiples_of_generator() {
-        // g(x)'in kendisi (en yüksek terim dahil) bir kod sözcüğüdür; tek bit hatası değildir.
+        // g(x) itself (including the highest term) is a codeword; a single bit error is not.
         let bch = FecParams::new((4, 5), false).unwrap().bch();
         let n = 500;
         let mut word = vec![0u8; n];
@@ -163,7 +163,7 @@ mod threshold_probe {
     use super::*;
     use crate::dvbs2::timing::tests::Lcg;
 
-    /// İdeal BPSK LLR'leriyle LDPC eşiği (geliştirme için):
+    /// LDPC threshold with ideal BPSK LLRs (for development):
     /// `cargo test --lib ldpc_threshold -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -193,7 +193,7 @@ mod threshold_probe {
                         .collect();
                     ok += code.decode(&llr, 50).converged as usize;
                 }
-                println!("oran {rate:?} Eb/N0 {ebn0} dB: {ok}/4");
+                println!("rate {rate:?} Eb/N0 {ebn0} dB: {ok}/4");
             }
         }
     }

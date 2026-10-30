@@ -1,21 +1,21 @@
-//! Alıcı ön ucu filtreleri: frekans kaydırma, RRC eşleştirilmiş filtre ve
-//! kesirli gecikmeli enterpolasyon.
+//! Receiver front-end filters: frequency shifting, RRC matched filter and
+//! fractional-delay interpolation.
 
 use std::f64::consts::PI;
 
 use num_complex::Complex;
 
-/// Örnekleri `-offset_hz` kadar kaydırır (yayın merkezini 0 Hz'e indirir).
+/// Shifts the samples by `-offset_hz` (moves the signal's centre to 0 Hz).
 pub fn mix_down(samples: &mut [Complex<f32>], offset_hz: f64, sample_rate: f64) {
     let step = -2.0 * PI * offset_hz / sample_rate;
     for (n, s) in samples.iter_mut().enumerate() {
-        // Uzun kayıtlarda faz biriktirmek yerine her örnekte yeniden hesapla.
+        // Recompute for every sample instead of accumulating phase over long recordings.
         let phase = (step * n as f64).rem_euclid(2.0 * PI);
         *s *= Complex::from_polar(1.0, phase as f32);
     }
 }
 
-/// Kök yükseltilmiş kosinüs darbesinin `t` (sembol cinsinden) anındaki değeri.
+/// Value of the root raised cosine pulse at time `t` (in symbols).
 pub fn rrc_pulse(t: f64, rolloff: f64) -> f64 {
     let a = rolloff;
     if t.abs() < 1e-9 {
@@ -29,8 +29,8 @@ pub fn rrc_pulse(t: f64, rolloff: f64) -> f64 {
     }
 }
 
-/// RRC filtresi katsayıları, birim enerjiye normalize.
-/// `sps` sembol başına örnek (kesirli olabilir), `span` iki yandaki sembol sayısı.
+/// RRC filter taps, normalized to unit energy.
+/// `sps` samples per symbol (may be fractional), `span` symbols on each side.
 pub fn rrc_taps(sps: f64, rolloff: f64, span: usize) -> Vec<f32> {
     let half = (span as f64 * sps).ceil() as i64;
     let taps: Vec<f64> = (-half..=half).map(|i| rrc_pulse(i as f64 / sps, rolloff)).collect();
@@ -38,8 +38,8 @@ pub fn rrc_taps(sps: f64, rolloff: f64, span: usize) -> Vec<f32> {
     taps.iter().map(|x| (x / energy) as f32).collect()
 }
 
-/// Gerçek katsayılı FIR filtreyi uygular; çıkış girişle aynı uzunlukta ve
-/// filtre gecikmesi kadar sola kaydırılmıştır (sıfır fazlı).
+/// Applies a real-coefficient FIR filter; the output has the input's length and
+/// is shifted left by the filter delay (zero phase).
 pub fn filter(samples: &[Complex<f32>], taps: &[f32]) -> Vec<Complex<f32>> {
     let half = taps.len() / 2;
     (0..samples.len())
@@ -56,14 +56,14 @@ pub fn filter(samples: &[Complex<f32>], taps: &[f32]) -> Vec<Complex<f32>> {
         .collect()
 }
 
-/// Parça parça gelen örneklere gerçek katsayılı FIR uygulayıp her `decimation`.
-/// çıkışı tutan akış süzgeci. Çıkış yalnızca tutulacak örnekler için
-/// hesaplanır; seyreltme maliyeti katsayı sayısı × çıkış hızıdır.
+/// Streaming filter that applies a real-coefficient FIR to samples arriving in
+/// chunks and keeps every `decimation`th output. Outputs are computed only for
+/// the kept samples; decimation costs taps × output rate.
 pub struct StreamingFir {
     taps: Vec<f32>,
     decimation: usize,
     history: Vec<Complex<f32>>,
-    /// Bir sonraki çıkış penceresinin `history` içindeki başlangıcı.
+    /// Start of the next output window within `history`.
     phase: usize,
 }
 
@@ -88,8 +88,8 @@ impl StreamingFir {
     }
 }
 
-/// Karmaşık örneklerle gerçek katsayıların iç çarpımı; dört ayrı toplayıcı
-/// işlemcinin aynı anda birden çok çarpma yapabilmesini sağlar.
+/// Dot product of complex samples with real taps; four separate accumulators
+/// let the CPU do several multiplications at once.
 fn dot(x: &[Complex<f32>], h: &[f32]) -> Complex<f32> {
     let mut acc = [Complex::<f32>::default(); 4];
     let (xc, hc) = (x.chunks_exact(4), h.chunks_exact(4));
@@ -106,15 +106,15 @@ fn dot(x: &[Complex<f32>], h: &[f32]) -> Complex<f32> {
     sum
 }
 
-/// `decimation` kat seyreltme öncesi alçak geçiren süzgeç: kesim yeni Nyquist
-/// frekansında, Blackman pencereli sinc, DC kazancı 1. Kesim ile yeni örnekleme
-/// hızı arasına katlanan bileşenler yayın bandının dışında kalır ve sonraki RRC
-/// süzgeci onları da bastırır.
+/// Low-pass filter before decimating by `decimation`: cutoff at the new Nyquist
+/// frequency, Blackman-windowed sinc, DC gain 1. Components folding in between the
+/// cutoff and the new sample rate stay outside the signal band, and the following
+/// RRC filter suppresses them too.
 pub fn decimation_taps(decimation: usize) -> Vec<f32> {
     let d = decimation.max(1) as f64;
     let len = 12 * decimation.max(1) + 1;
     let mid = (len / 2) as f64;
-    let cutoff = 0.5 / d; // örnekleme hızına göre
+    let cutoff = 0.5 / d; // relative to the sample rate
     let taps: Vec<f64> = (0..len)
         .map(|i| {
             let n = i as f64 - mid;
@@ -128,7 +128,7 @@ pub fn decimation_taps(decimation: usize) -> Vec<f32> {
     taps.iter().map(|t| (t / sum) as f32).collect()
 }
 
-/// Örnekleri birim RMS güce ölçekler.
+/// Scales the samples to unit RMS power.
 pub fn normalize(samples: &mut [Complex<f32>]) {
     let power = samples.iter().map(|s| s.norm_sqr() as f64).sum::<f64>() / samples.len().max(1) as f64;
     if power > 0.0 {
@@ -137,9 +137,9 @@ pub fn normalize(samples: &mut [Complex<f32>]) {
     }
 }
 
-/// Pencereli sinc ile kesirli konumda örnek üreten enterpolatör.
+/// Interpolator producing samples at fractional positions with a windowed sinc.
 pub struct Interpolator {
-    /// `phases` adet faz için `TAPS` katsayılı tablo.
+    /// Table of `TAPS` taps for each of `phases` phases.
     table: Vec<[f32; Self::TAPS]>,
 }
 
@@ -155,7 +155,7 @@ impl Interpolator {
                 let mut row = [0f32; Self::TAPS];
                 let mut sum = 0.0;
                 for (k, r) in row.iter_mut().enumerate() {
-                    // Katsayı k, (taban - TAPS/2 + 1 + k) indisli örneği çarpar.
+                    // Tap k multiplies the sample at index (base - TAPS/2 + 1 + k).
                     let x = k as f64 - (half - 1.0) - frac;
                     let sinc = if x.abs() < 1e-12 { 1.0 } else { (PI * x).sin() / (PI * x) };
                     let w = 0.42 + 0.5 * (PI * x / half).cos() + 0.08 * (2.0 * PI * x / half).cos();
@@ -170,7 +170,7 @@ impl Interpolator {
         Self { table }
     }
 
-    /// `t` kesirli örnek konumundaki değer. Kenarlara yakın konumlarda `None`.
+    /// Value at fractional sample position `t`. `None` near the edges.
     pub fn at(&self, x: &[Complex<f32>], t: f64) -> Option<Complex<f32>> {
         let base = t.floor();
         let first = base as i64 - (Self::TAPS as i64 / 2 - 1);
@@ -230,9 +230,9 @@ mod tests {
             let tail = &out[out.len() / 2..];
             (tail.iter().map(|z| z.norm_sqr()).sum::<f32>() / tail.len() as f32).sqrt()
         };
-        // Yeni Nyquist frekansı 1/16; yayın bandı bunun yarısına kadar, katlanan bölge 3/16'dan sonra.
-        assert!(tone(0.02) > 0.95, "geçirme bandı");
-        assert!(tone(0.25) < 0.01, "durdurma bandı");
+        // New Nyquist frequency 1/16; signal band up to half of it, folding region above 3/16.
+        assert!(tone(0.02) > 0.95, "passband");
+        assert!(tone(0.25) < 0.01, "stopband");
     }
 
     #[test]

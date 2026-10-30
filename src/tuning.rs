@@ -1,9 +1,9 @@
-//! LNB frekans hesapları.
+//! LNB frequency calculations.
 
-/// LNB çıkışındaki ara frekansı (IF) hesaplar. Tüm değerler Hz cinsindendir.
+/// Computes the intermediate frequency (IF) at the LNB output. All values are in Hz.
 ///
-/// QO-100 alımında LNB lokal osilatörü yayın frekansının altındadır,
-/// bu yüzden IF = RF - LO olur.
+/// For QO-100 reception the LNB local oscillator is below the signal frequency,
+/// so IF = RF - LO.
 pub fn intermediate_frequency(rf_hz: f64, lo_hz: f64) -> f64 {
     rf_hz - lo_hz
 }

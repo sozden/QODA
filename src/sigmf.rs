@@ -1,4 +1,4 @@
-//! SigMF kayıtlarını okuma (cf32_le ve ci16_le).
+//! Reading SigMF recordings (cf32_le and ci16_le).
 
 use std::io;
 use std::path::Path;
@@ -7,13 +7,13 @@ use num_complex::Complex;
 
 pub struct Recording {
     pub sample_rate: f64,
-    /// Kaydın RF merkez frekansı (Hz); meta veride yoksa 0.
+    /// RF centre frequency of the recording (Hz); 0 if missing from the metadata.
     pub frequency: f64,
     pub samples: Vec<Complex<f32>>,
 }
 
-/// `path` `.sigmf-meta`, `.sigmf-data` ya da uzantısız taban ad olabilir.
-/// `max_samples` verilirse yalnızca ilk o kadar örnek okunur.
+/// `path` may be the `.sigmf-meta`, the `.sigmf-data` or the base name without extension.
+/// If `max_samples` is given, only that many leading samples are read.
 pub fn read(path: &Path, max_samples: Option<usize>) -> io::Result<Recording> {
     let meta = std::fs::read_to_string(path.with_extension("sigmf-meta"))?;
     let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
@@ -36,7 +36,7 @@ pub fn read(path: &Path, max_samples: Option<usize>) -> io::Result<Recording> {
             })
             .collect()
     } else {
-        // ci16: tam ölçek ±32768.
+        // ci16: full scale ±32768.
         let scale = 1.0 / 32768.0;
         bytes
             .chunks_exact(4)
@@ -54,8 +54,8 @@ pub fn read(path: &Path, max_samples: Option<usize>) -> io::Result<Recording> {
     Ok(Recording { sample_rate, frequency, samples })
 }
 
-/// JSON metninde `"anahtar": sayı` biçimindeki ilk sayıyı bulur.
-/// Tam bir JSON ayrıştırıcı gerektirmeyen basit meta veriler için yeterlidir.
+/// Finds the first number of the form `"key": number` in a JSON text.
+/// Enough for simple metadata without needing a full JSON parser.
 fn number(json: &str, key: &str) -> Option<f64> {
     let quoted = format!("\"{key}\"");
     let rest = &json[json.find(&quoted)? + quoted.len()..];

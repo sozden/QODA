@@ -1,22 +1,22 @@
-//! libiio üzerinden AD9361 tabanlı alıcılar (ADALM-Pluto, LibreSDR).
+//! AD9361-based receivers over libiio (ADALM-Pluto, LibreSDR).
 //!
-//! libiio çalışma anında yüklenir: kurulu değilse program açılır, yalnızca bu
-//! cihazlar kullanılamaz. libiio 0.x C API'si kullanılır (Windows'ta PothosSDR
-//! ile gelen `libiio.dll`, Linux'ta `libiio.so.0`).
+//! libiio is loaded at run time: if it is not installed the program still starts
+//! and only these devices are unavailable. The libiio 0.x C API is used (on Windows
+//! the `libiio.dll` that comes with PothosSDR, on Linux `libiio.so.0`).
 
 use std::ffi::{CString, c_char, c_void};
 
 use libloading::Library;
 use num_complex::Complex;
 
-/// Bir iletimde okunan örnek sayısı (2.4 MS/s'de ~27 ms).
+/// Number of samples read per transfer (~27 ms at 2.4 MS/s).
 const BUFFER_SAMPLES: usize = 65_536;
-/// AD9361 ADC'si 12 bit; örnekler ±2048 aralığında gelir.
+/// The AD9361 ADC is 12-bit; samples arrive in the ±2048 range.
 const FULL_SCALE: f32 = 2048.0;
 
 type Ptr = *mut c_void;
 
-/// Kullanılan libiio işlevleri.
+/// libiio functions in use.
 struct Api {
     create_context: unsafe extern "C" fn(*const c_char) -> Ptr,
     context_destroy: unsafe extern "C" fn(Ptr),
@@ -29,7 +29,7 @@ struct Api {
     buffer_start: unsafe extern "C" fn(Ptr) -> *const c_void,
     buffer_end: unsafe extern "C" fn(Ptr) -> *const c_void,
     buffer_destroy: unsafe extern "C" fn(Ptr),
-    // İşlev göstericileri geçerli kaldıkça kütüphane açık kalmalı.
+    // The library must stay open as long as the function pointers are valid.
     _lib: Library,
 }
 
@@ -70,33 +70,33 @@ impl Api {
     }
 }
 
-/// libiio yüklenebiliyor mu (tanılama için).
+/// Whether libiio can be loaded (for diagnostics).
 pub fn library_status() -> Result<(), String> {
     Api::load().map(|_| ())
 }
 
 fn cstr(s: &str) -> CString {
-    CString::new(s).expect("NUL içermeyen metin")
+    CString::new(s).expect("text without NUL")
 }
 
-/// Açık bir AD9361 alıcısı.
+/// An open AD9361 receiver.
 pub struct IioRadio {
     api: Api,
     context: Ptr,
-    /// ad9361-phy'nin alıcı ayar kanalı (örnekleme, bant, kazanç).
+    /// The receive settings channel of ad9361-phy (sample rate, bandwidth, gain).
     rx_config: Ptr,
-    /// ad9361-phy'nin RX_LO kanalı.
+    /// The RX_LO channel of ad9361-phy.
     rx_lo: Ptr,
     buffer: Ptr,
     pending: Vec<Complex<f32>>,
     position: usize,
 }
 
-// libiio nesneleri yalnızca bu yapıya ait ve tek iş parçacığında kullanılıyor.
+// The libiio objects belong only to this struct and are used on a single thread.
 unsafe impl Send for IioRadio {}
 
 impl IioRadio {
-    /// `uri` örn. "ip:192.168.1.47" veya "usb:".
+    /// `uri` e.g. "ip:192.168.1.47" or "usb:".
     pub fn open(uri: &str) -> Result<Self, String> {
         let api = Api::load()?;
         unsafe {
@@ -138,16 +138,16 @@ impl IioRadio {
         self.write(self.rx_lo, "frequency", &format!("{}", hz.round() as i64))
     }
 
-    /// Örnekleme hızıyla birlikte analog süzgeci de ayarlar. Süzgeç örnekleme
-    /// hızı kadar açılır: daha dar olunca bant kenarına yakın yayınların üstü
-    /// eğimli görünür ve ölçümleri bozulur.
+    /// Sets the analog filter together with the sample rate. The filter is opened to
+    /// the sample rate: when narrower, signals near the band edge look tilted on top
+    /// and their measurements are skewed.
     pub fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
         self.write(self.rx_config, "sampling_frequency", &format!("{}", rate.round() as i64))?;
         let bandwidth = rate.clamp(200_000.0, 40_000_000.0);
         self.write(self.rx_config, "rf_bandwidth", &format!("{}", bandwidth.round() as i64))
     }
 
-    /// `None` otomatik kazanç (yavaş AGC), aksi halde dB cinsinden sabit kazanç.
+    /// `None` for automatic gain (slow AGC), otherwise a fixed gain in dB.
     pub fn set_gain(&mut self, gain: Option<f64>) -> Result<(), String> {
         match gain {
             Some(db) => {
@@ -158,7 +158,7 @@ impl IioRadio {
         }
     }
 
-    /// `out`u doldurur; gerekirse cihazdan yeni blok okur.
+    /// Fills `out`; reads a new block from the device if needed.
     pub fn read(&mut self, out: &mut [Complex<f32>]) -> Result<usize, String> {
         if self.position >= self.pending.len() {
             let n = unsafe { (self.api.buffer_refill)(self.buffer) };
@@ -171,7 +171,7 @@ impl IioRadio {
                 let start = (self.api.buffer_start)(self.buffer) as *const i16;
                 let end = (self.api.buffer_end)(self.buffer) as *const i16;
                 let raw = std::slice::from_raw_parts(start, end.offset_from(start) as usize);
-                // I ve Q kanalları sırayla, işaretli 16 bit.
+                // I and Q channels interleaved, signed 16-bit.
                 self.pending.extend(
                     raw.chunks_exact(2)
                         .map(|iq| Complex::new(iq[0] as f32 / FULL_SCALE, iq[1] as f32 / FULL_SCALE)),
@@ -198,7 +198,7 @@ impl Drop for IioRadio {
 mod tests {
     use super::*;
 
-    /// Gerçek cihazla deneme: `QODA_IIO_URI=ip:192.168.2.1 cargo test --bin qoda iio -- --ignored`
+    /// Test with a real device: `QODA_IIO_URI=ip:192.168.2.1 cargo test --bin qoda iio -- --ignored`
     #[test]
     #[ignore]
     fn reads_samples_from_device() {
@@ -216,7 +216,7 @@ mod tests {
         let elapsed = started.elapsed().as_secs_f64();
         let rms = (buf.iter().map(|z| z.norm_sqr()).sum::<f32>() / buf.len() as f32).sqrt();
         let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
-        println!("1 s örnek {elapsed:.2} s'de okundu, RMS {rms:.4}, tepe {peak:.4}");
+        println!("1 s of samples read in {elapsed:.2} s, RMS {rms:.4}, peak {peak:.4}");
         assert!(rms > 0.001 && peak < 1.0);
     }
 }

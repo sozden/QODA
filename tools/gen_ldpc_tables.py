@@ -17,13 +17,13 @@ def section(prefix, idx):
         if not s or "ETSI" in s or s.startswith("====="):
             continue
         if not re.fullmatch(r"[0-9 ]+", s):
-            raise SystemExit(f"beklenmeyen satır {prefix}.{idx}: {s!r}")
+            raise SystemExit(f"unexpected row {prefix}.{idx}: {s!r}")
         lines.append([int(t) for t in s.split()])
     return lines
 
 def rebuild_one(lines, rows, m):
-    # Satır kaymaları sayıların sırasını bozmaz; yüksek dereceli satırların
-    # uzunluğu en uzun metin satırıdır, kalanlar 3 derecelidir.
+    # Line wraps do not change the order of the numbers; the high-degree rows are
+    # as long as the longest text line, the rest have degree 3.
     d1 = max(map(len, lines))
     expected = lambda d1, a: a * d1 + (rows - a) * 3
     tokens = [t for l in lines for t in l]
@@ -32,22 +32,22 @@ def rebuild_one(lines, rows, m):
     else:
         a, rem = divmod(len(tokens) - 3 * rows, d1 - 3)
         if rem != 0 or not 0 < a <= rows:
-            raise SystemExit(f"satır yapısı çözülemedi: {len(tokens)} sayı, {rows} satır, d1={d1}")
+            raise SystemExit(f"could not resolve row structure: {len(tokens)} numbers, {rows} rows, d1={d1}")
     assert expected(d1, a) == len(tokens)
     table, p = [], 0
     for r in range(rows):
         d = d1 if r < a else 3
         table.append(tokens[p:p + d]); p += d
-    assert all(v < m for row in table for v in row), "adres sınır dışı"
+    assert all(v < m for row in table for v in row), "address out of range"
     return d1, a, table
 
 def merge_at(lines, i):
-    # Sayfa geçişinde bir sayı ikiye bölünmüş: "29 734" + "7 8027" -> "29 7347 8027".
+    # A number split in two across a page break: "29 734" + "7 8027" -> "29 7347 8027".
     return lines[:i] + [[lines[i][0], int(f"{lines[i][1]}{lines[i+1][0]}"), lines[i+1][1]]] + lines[i+2:]
 
 def rebuild(lines, rows, n, k):
-    """Bölünmüş sayı adaylarını dener; normal kodlarda denetim derecesi sabit
-    olan, kısa kodlarda sayı adedi tutan çözümü seçer."""
+    """Tries the split-number candidates; picks the solution with a uniform check
+    degree for normal codes and with the right number count for short codes."""
     m = n - k
     candidates = [None] + [i for i in range(len(lines) - 1) if len(lines[i]) == 2 and len(lines[i+1]) == 2]
     good = []
@@ -61,10 +61,10 @@ def rebuild(lines, rows, n, k):
         if n == 16200 or dmin == dmax:
             good.append((c, d1, a, table))
     if len(good) != 1:
-        raise SystemExit(f"tek çözüm bulunamadı: adaylar {[g[0] for g in good]}")
+        raise SystemExit(f"no unique solution: candidates {[g[0] for g in good]}")
     c, d1, a, table = good[0]
     if c is not None:
-        print(f"  bölünmüş sayı birleştirildi: {lines[c]} + {lines[c+1]}")
+        print(f"  joined split number: {lines[c]} + {lines[c+1]}")
     return d1, a, table
 
 def check_degrees(n, k, table):
@@ -87,10 +87,10 @@ def bch(prefix_line):
     return polys
 
 rs = []
-rs.append("//! DVB-S2 LDPC eşlik biti biriktirici adresleri ve BCH polinomları.")
+rs.append("//! DVB-S2 LDPC parity bit accumulator addresses and BCH polynomials.")
 rs.append("//!")
-rs.append("//! ETSI EN 302 307-1, Ek B (n = 64800), Ek C (n = 16200) ve tablo 6a/6b.")
-rs.append("//! Bu dosya standart metninden `gen_tables.py` ile üretilmiştir; elle değiştirmeyin.")
+rs.append("//! ETSI EN 302 307-1, annex B (n = 64800), annex C (n = 16200) and tables 6a/6b.")
+rs.append("//! Generated from the standard's text by `tools/gen_ldpc_tables.py`; do not edit by hand.")
 rs.append("")
 rs.append("#![cfg_attr(rustfmt, rustfmt_skip)]")
 rs.append("")
@@ -101,7 +101,7 @@ for prefix, n, rates in (("B", 64800, NORMAL), ("C", 16200, SHORT)):
         d1, a, table = rebuild(lines, k // 360, n, k)
         dmin, dmax = check_degrees(n, k, table)
         name = f"{'NORMAL' if n == 64800 else 'SHORT'}_{rate.replace('/', '_')}"
-        report.append(f"{name}: k={k} satır={len(table)} ({a}×{d1} + {len(table)-a}×3) denetim derecesi {dmin}..{dmax}")
+        report.append(f"{name}: k={k} rows={len(table)} ({a}×{d1} + {len(table)-a}×3) check degree {dmin}..{dmax}")
         rs.append(f"pub static {name}: [&[u16]; {len(table)}] = [")
         for row in table:
             rs.append("    &[" + ", ".join(map(str, row)) + "],")
@@ -109,7 +109,7 @@ for prefix, n, rates in (("B", 64800, NORMAL), ("C", 16200, SHORT)):
         rs.append("")
 for label, line in (("NORMAL", "Table 6a:"), ("SHORT", "Table 6b:")):
     polys = bch(line)
-    rs.append(f"/// g1..g12 polinomlarının sıfırdan farklı terimlerinin üsleri.")
+    rs.append(f"/// Exponents of the nonzero terms of polynomials g1..g12.")
     rs.append(f"pub static BCH_{label}: [&[u8]; 12] = [")
     for p in polys:
         rs.append("    &[" + ", ".join(map(str, p)) + "],")

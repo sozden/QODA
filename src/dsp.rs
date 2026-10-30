@@ -1,4 +1,4 @@
-//! Spektrum hesabı.
+//! Spectrum computation.
 
 use std::f32::consts::PI;
 use std::sync::Arc;
@@ -6,7 +6,7 @@ use std::sync::Arc;
 use num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 
-/// Hann pencereli, blok ortalamalı güç spektrumu.
+/// Hann-windowed, block-averaged power spectrum.
 pub struct Spectrum {
     fft: Arc<dyn Fft<f32>>,
     window: Vec<f32>,
@@ -31,8 +31,8 @@ impl Spectrum {
         self.window.len()
     }
 
-    /// Örnekleri FFT boyutunda bloklara bölüp ortalama gücü dB olarak döndürür.
-    /// Çıkış ortalanmıştır: ilk eleman -fs/2, son eleman +fs/2 civarıdır.
+    /// Splits the samples into FFT-sized blocks and returns the mean power in dB.
+    /// The output is centred: the first element is around -fs/2, the last around +fs/2.
     pub fn compute(&mut self, samples: &[Complex<f32>]) -> Vec<f32> {
         let n = self.size();
         self.acc.fill(0.0);
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn tone_lands_in_expected_bin() {
         let n = 256;
-        // fs/4 frekansında karmaşık ton: ortalanmış spektrumda 3n/4 kutusuna düşer.
+        // Complex tone at fs/4: lands in bin 3n/4 of the centred spectrum.
         let samples: Vec<Complex<f32>> = (0..n * 4)
             .map(|i| Complex::from_polar(1.0, PI / 2.0 * i as f32))
             .collect();

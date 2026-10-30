@@ -1,8 +1,8 @@
-//! Akış hâlinde DVB-S2 alıcı: IQ örnekleri parça parça girer, MPEG-TS çıkar.
+//! Streaming DVB-S2 receiver: IQ samples go in chunk by chunk, MPEG-TS comes out.
 //!
-//! Zincir: DC engelleme → frekans kaydırma → (gerekirse seyreltme) → RRC eşleştirilmiş filtre → AGC → Gardner zamanlama →
-//! PL başlık senkronu → karıştırma çözümü + taşıyıcı takibi + demap → LDPC → BCH →
-//! BBFRAME → TS. Senkron bulunduktan sonra her başlık beklenen konumda doğrulanır.
+//! Chain: DC blocking → frequency shift → (decimation if needed) → RRC matched filter → AGC → Gardner timing →
+//! PL header sync → descrambling + carrier tracking + demap → LDPC → BCH →
+//! BBFRAME → TS. Once synced, every header is verified at its expected position.
 
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
@@ -23,34 +23,34 @@ use super::timing::TimingRecovery;
 use crate::tsinfo::{ServiceInfo, TsInfo};
 
 const TIMING_BANDWIDTH: f64 = 0.005;
-/// DC engelleyicinin ortalama izleme katsayısı (örnek başına). Yerel osilatör
-/// sızıntısını (HackRF, RTL-SDR merkez tepesi) yaklaşık 1/α örnekte öğrenir;
-/// çentiği yayının kendisini etkilemeyecek kadar dardır.
+/// Mean tracking factor of the DC blocker (per sample). It learns local oscillator
+/// leakage (the HackRF and RTL-SDR centre spike) in about 1/α samples; its notch
+/// is narrow enough not to affect the signal itself.
 const DC_ALPHA: f32 = 1e-5;
-/// Seyreltmeden sonra sembol başına en az bu kadar örnek kalır.
+/// At least this many samples per symbol remain after decimation.
 const MIN_SAMPLES_PER_SYMBOL: f64 = 2.4;
-/// Taşıyıcı takip döngüsünün bant genişliği (sembol hızına göre). Daha geniş
-/// döngü zayıf sinyalde ve HackRF gibi faz gürültüsü yüksek alıcılarda kayıyor.
+/// Bandwidth of the carrier tracking loop (relative to the symbol rate). A wider
+/// loop slips on weak signals and on receivers with high phase noise such as the HackRF.
 const CARRIER_BANDWIDTH: f32 = 0.002;
 const LDPC_MAX_ITERATIONS: usize = 50;
-/// LDPC çözümü için en fazla iş parçacığı.
+/// Maximum number of threads for LDPC decoding.
 const MAX_LDPC_WORKERS: usize = 8;
-/// Kilitsizken başlık aramak için biriktirilen sembol sayısı (bir normal çerçeveden fazla).
+/// Number of symbols collected to search for headers while unlocked (more than one normal frame).
 const SEARCH_WINDOW: usize = 40_000;
-/// Kilitliyken beklenen başlığın etrafında aranan sembol payı.
+/// Symbol margin searched around the expected header while locked.
 const VERIFY_SLACK: usize = 16;
-/// Üst üste bu kadar başlık doğrulanamazsa kilit bırakılır.
+/// The lock is dropped if this many headers in a row cannot be verified.
 const MAX_MISSES: u32 = 3;
-/// Başlık kabulü için en düşük PLS güveni.
+/// Minimum PLS confidence for accepting a header.
 const MIN_PLS_MARGIN: f32 = 0.3;
-/// Kilitliyken başlığın yerinde sayılması için en düşük SOF ilişkisi.
+/// Minimum SOF correlation for a header to count as in place while locked.
 const MIN_LOCKED_SOF: f32 = 0.8;
-/// Her çerçeve sonunda PLL frekansının ortak tahmine katılma oranı.
+/// Weight of the PLL frequency in the common estimate at the end of each frame.
 const FREQ_TRACKING: f32 = 0.5;
 
 pub struct ReceiverConfig {
     pub sample_rate: f64,
-    /// Yayın merkezinin alınan bandın merkezine göre ofseti (Hz).
+    /// Offset of the signal's centre from the centre of the received band (Hz).
     pub offset_hz: f64,
     pub symbol_rate: f64,
     pub rolloff: f64,
@@ -61,22 +61,22 @@ pub struct ReceiverStats {
     pub locked: bool,
     pub pls: Option<Pls>,
     pub frames_ok: u64,
-    /// LDPC'nin yakınsamadığı çerçeveler.
+    /// Frames on which LDPC did not converge.
     pub frames_failed: u64,
     pub bch_errors: u64,
-    /// Henüz desteklenmeyen modülasyondaki çerçeveler.
+    /// Frames in a modulation that is not supported yet.
     pub frames_unsupported: u64,
-    /// Son çerçeve gövdesinin SNR'ı (dB).
+    /// SNR of the last frame body (dB).
     pub snr_db: f32,
-    /// Ayar frekansına göre kalan taşıyıcı kayması (Hz).
+    /// Remaining carrier offset relative to the tuned frequency (Hz).
     pub carrier_offset_hz: f64,
     pub ts_packets: u64,
     pub ts_crc_errors: u64,
-    /// Son çerçevede LDPC'nin harcadığı iterasyon.
+    /// Iterations LDPC spent on the last frame.
     pub ldpc_iterations: usize,
-    /// TS süreklilik sayacı kopuklukları (yayındaki eksik paketler).
+    /// TS continuity counter discontinuities (packets missing from the broadcast).
     pub ts_cc_errors: u64,
-    /// DVB tablolarından okunan servis adı, sağlayıcı ve akışlar.
+    /// Service name, provider and streams read from the DVB tables.
     pub service: ServiceInfo,
 }
 
@@ -87,7 +87,7 @@ struct FecState {
     bch: Bch,
 }
 
-/// LDPC iş parçacıklarına giden bir çerçeve.
+/// A frame sent to the LDPC threads.
 struct Job {
     seq: u64,
     fec: Arc<FecState>,
@@ -100,7 +100,7 @@ struct Outcome {
     decoded: Decoded,
 }
 
-/// Çerçeveleri paralel çözen iş parçacıkları; sonuçlar sıra numarasıyla döner.
+/// Threads decoding frames in parallel; results come back with a sequence number.
 fn spawn_ldpc_workers() -> (Sender<Job>, ChannelReceiver<Outcome>) {
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let (out_tx, out_rx) = mpsc::channel();
@@ -130,29 +130,29 @@ fn spawn_ldpc_workers() -> (Sender<Job>, ChannelReceiver<Outcome>) {
 
 pub struct Receiver {
     cfg: ReceiverConfig,
-    /// Girişteki DC bileşeninin izlenen değeri.
+    /// Tracked value of the DC component at the input.
     dc: Complex<f32>,
-    /// Frekans kaydırma osilatörü: her örnekte `osc_step` ile döner.
+    /// Frequency shift oscillator: rotates by `osc_step` every sample.
     osc: Complex<f32>,
     osc_step: Complex<f32>,
-    /// Giriş hızı yüksekse yayını sembol hızına yakın bir hıza indiren süzgeç.
+    /// Filter bringing the signal down to a rate near the symbol rate when the input rate is high.
     decimator: Option<filters::StreamingFir>,
     rrc: filters::StreamingFir,
     agc_power: Option<f32>,
     timing: TimingRecovery,
     symbols: Vec<Complex<f32>>,
     search: HeaderSearch,
-    /// Kilitliyken bir sonraki başlığın `symbols` içindeki beklenen konumu.
+    /// Expected position of the next header within `symbols` while locked.
     expected: Option<usize>,
     last_frame_len: usize,
     misses: u32,
-    /// Ortak frekans kayması (radyan/sembol). İlk kilitte başlıktan, sonra başarıyla
-    /// çözülen her çerçevenin sonundaki PLL frekansından güncellenir.
+    /// Common frequency offset (radians/symbol). Set from the header at first lock, then
+    /// updated from the PLL frequency at the end of every frame.
     freq: Option<f32>,
     fec: Option<Arc<FecState>>,
     jobs: Sender<Job>,
     outcomes: ChannelReceiver<Outcome>,
-    /// Gönderilen ve sırayla işlenen çerçeve sayıları; arada kalanlar `pending`'de bekler.
+    /// Number of frames sent and processed in order; those in between wait in `pending`.
     submitted: u64,
     emitted: u64,
     pending: BTreeMap<u64, Outcome>,
@@ -200,7 +200,7 @@ impl Receiver {
         }
     }
 
-    /// IQ örneklerini işler; çözülen TS paketlerini `ts`e ekler.
+    /// Processes IQ samples; appends decoded TS packets to `ts`.
     pub fn process(&mut self, iq: &[Complex<f32>], ts: &mut Vec<u8>) {
         let filtered = self.front_end(iq);
         let mut symbols = Vec::with_capacity(filtered.len());
@@ -210,12 +210,12 @@ impl Receiver {
         self.collect(ts, false);
     }
 
-    /// Bekleyen tüm LDPC sonuçlarını bekleyip işler (kayıt sonunda).
+    /// Waits for and processes all pending LDPC results (at the end of a recording).
     pub fn finish(&mut self, ts: &mut Vec<u8>) {
         self.collect(ts, true);
     }
 
-    /// LDPC sonuçlarını alıp çerçeve sırasına göre işler.
+    /// Collects LDPC results and processes them in frame order.
     fn collect(&mut self, ts: &mut Vec<u8>, wait: bool) {
         while self.emitted < self.submitted {
             let next = if wait { self.outcomes.recv().ok() } else { self.outcomes.try_recv().ok() };
@@ -233,7 +233,7 @@ impl Receiver {
         }
     }
 
-    /// DC engelleme, frekans kaydırma, seyreltme, RRC filtre ve AGC.
+    /// DC blocking, frequency shift, decimation, RRC filter and AGC.
     fn front_end(&mut self, iq: &[Complex<f32>]) -> Vec<Complex<f32>> {
         let mixed: Vec<Complex<f32>> = iq
             .iter()
@@ -244,7 +244,7 @@ impl Receiver {
                 v
             })
             .collect();
-        // Osilatörün genliği yuvarlama hatalarıyla kaymasın.
+        // Keep the oscillator's amplitude from drifting with rounding errors.
         self.osc /= self.osc.norm();
         let narrowed = match &mut self.decimator {
             Some(d) => {
@@ -302,11 +302,11 @@ impl Receiver {
             }
             let lo = expected.saturating_sub(VERIFY_SLACK);
             let window = &self.symbols[lo..expected + HEADER_LEN + VERIFY_SLACK];
-            // Kilitliyken SOF yerindeyse PLS güveni düşük olsa da çerçeve kabul edilir:
-            // aynı sinyalleşme geldiyse olduğu gibi, belirsizse önceki sinyalleşmeyle.
+            // While locked, if the SOF is in place the frame is accepted even with low PLS confidence:
+            // as is if the same signalling came, with the previous signalling if it is ambiguous.
             let last = self.stats.pls;
-            // Frekans biliniyorsa başlıktan yeniden tahmin edilmez: tek başlığın
-            // tahmini düşük SNR'da PLL'in izlediği değerden çok daha gürültülüdür.
+            // If the frequency is known it is not re-estimated from the header: a single header's
+            // estimate is much noisier at low SNR than the value the PLL tracks.
             let hit = self.search.best(window, self.freq).and_then(|mut h| {
                 let confident = h.pls_margin >= MIN_PLS_MARGIN && h.pls.frame_len().is_some();
                 if confident || Some(h.pls) == last {
@@ -333,7 +333,7 @@ impl Receiver {
                     self.expected = None;
                     self.stats.locked = false;
                 } else {
-                    // Başlık bu sefer okunamadı; çerçeve uzunluğu değişmemiş varsayılır.
+                    // The header could not be read this time; assume the frame length has not changed.
                     self.advance(expected + self.last_frame_len);
                 }
                 continue;
@@ -352,14 +352,14 @@ impl Receiver {
         }
     }
 
-    /// Bir sonraki başlığı `next` konumunda bekle ve önceki sembolleri at.
+    /// Waits for the next header at position `next` and drops the symbols before it.
     fn advance(&mut self, next: usize) {
         let cut = next.saturating_sub(VERIFY_SLACK).min(self.symbols.len());
         self.symbols.drain(..cut);
         self.expected = Some(next - cut);
     }
 
-    /// Yeni TS paketlerinde PID başına süreklilik sayacını denetler.
+    /// Checks the continuity counter per PID in new TS packets.
     fn count_cc_errors(&mut self, packets: &[u8]) {
         for p in packets.chunks_exact(188) {
             let pid = (((p[1] & 0x1F) as u16) << 8) | p[2] as u16;
@@ -375,11 +375,11 @@ impl Receiver {
         }
     }
 
-    /// Çerçeve gövdesini demap edip LDPC çözümü için iş parçacıklarına gönderir.
+    /// Demaps the frame body and sends it to the threads for LDPC decoding.
     fn decode_frame(&mut self, hit: &HeaderHit) {
         let pls = hit.pls;
         if pls.modcod == 0 {
-            return; // dummy çerçeve
+            return; // dummy frame
         }
         let Some((modulation, rate)) = pls.modulation_and_rate() else { return };
 
@@ -387,7 +387,7 @@ impl Receiver {
         let freq = *self.freq.get_or_insert(w);
         self.stats.carrier_offset_hz = freq as f64 * self.cfg.symbol_rate / TAU;
 
-        // 32APSK henüz desteklenmiyor.
+        // 32APSK is not supported yet.
         let mapping = match modulation {
             Modulation::Qpsk => None,
             m => match Mapping::new(m, rate) {
@@ -408,8 +408,8 @@ impl Receiver {
         if self.scrambling.len() < body_len {
             self.scrambling = plframe::scrambling_sequence(0, body_len);
         }
-        // Başlığın ortasındaki faz, başlığın kendi frekans tahminine göre en güvenilir noktadır;
-        // oradan gövde başına ortak frekansla ilerlenir.
+        // The phase in the middle of the header is the most reliable point for the header's own
+        // frequency estimate; from there advance to the start of the body with the common frequency.
         let mid = HEADER_LEN as f32 / 2.0;
         let carrier = CarrierState {
             phase: hit.phase + hit.freq_rad_per_symbol * mid + freq * mid,
@@ -422,9 +422,9 @@ impl Receiver {
             Some(map) => plframe::demap(body, scrambling, pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH, map),
         };
         self.stats.snr_db = demapped.snr_db;
-        // PLL'in gövde sonundaki frekansı tek başlığın tahmininden çok daha iyidir.
-        // LDPC sonucunu beklemeden kullanılır; yoksa ilk tahmin hatalıyken sonraki
-        // başlıklar da aynı hatayla çözülür.
+        // The PLL's frequency at the end of the body is much better than a single header's estimate.
+        // It is used without waiting for the LDPC result; otherwise, while the first estimate is wrong,
+        // the following headers are decoded with the same error.
         if let Some(f) = &mut self.freq {
             *f += FREQ_TRACKING * (demapped.final_freq - *f);
         }
@@ -439,7 +439,7 @@ impl Receiver {
         }
     }
 
-    /// LDPC sonucu gelen çerçeveyi sırasıyla bitirir: BCH, BBFRAME, TS.
+    /// Finishes frames in order as their LDPC results arrive: BCH, BBFRAME, TS.
     fn finish_frame(&mut self, o: Outcome, ts: &mut Vec<u8>) {
         let Outcome { fec, decoded, .. } = o;
         self.stats.ldpc_iterations = decoded.iterations;
@@ -478,7 +478,7 @@ mod tests {
     const SPS: f64 = 2.5;
     const ROLLOFF: f64 = 0.2;
 
-    /// LDPC kodlanmış rastgele verili, karıştırılmış, pilotlu tam PLFRAME'ler (semboller).
+    /// Complete scrambled PLFRAMEs with pilots and LDPC-encoded random data (symbols).
     fn synthetic_frames(code: u8, frames: usize) -> Vec<Complex<f32>> {
         let pls = Pls::from_code(code);
         let (modulation, rate) = pls.modulation_and_rate().unwrap();
@@ -509,7 +509,7 @@ mod tests {
         out
     }
 
-    /// Sembolleri RRC ile şekillendirip `snr_db` gürültüyle alıcıdan geçirir.
+    /// Shapes the symbols with RRC and passes them through the receiver with `snr_db` noise.
     fn decode(symbols: &[Complex<f32>], snr_db: f64) -> ReceiverStats {
         let mut x = shape(symbols, SPS, ROLLOFF, 0.3);
         let sigma = (10f64.powf(-snr_db / 10.0) / SPS / 2.0).sqrt() as f32;
@@ -530,7 +530,7 @@ mod tests {
         }
         rx.finish(&mut ts);
         println!(
-            "{} çerçeve çözüldü, {} başarısız, SNR {:.1} dB, okunan {:?}",
+            "{} frames decoded, {} failed, SNR {:.1} dB, read {:?}",
             rx.stats.frames_ok,
             rx.stats.frames_failed,
             rx.stats.snr_db,
@@ -541,20 +541,20 @@ mod tests {
 
     #[test]
     fn decodes_synthetic_8psk_with_pilots() {
-        // 8PSK 2/3, normal çerçeve, pilotlu.
+        // 8PSK 2/3, normal frame, with pilots.
         let s = decode(&synthetic_frames((13 << 2) | 1, 4), 2.0);
         assert!(s.frames_ok >= 2 && s.frames_failed == 0, "{} ✓ {} ✗", s.frames_ok, s.frames_failed);
     }
 
     #[test]
     fn decodes_synthetic_8psk_rate_3_5() {
-        // 8PSK 3/5: bit karıştırıcı sütunları ters sırada okunur.
+        // 8PSK 3/5: the bit interleaver columns are read in reverse order.
         let s = decode(&synthetic_frames(12 << 2, 4), 1.0);
         assert!(s.frames_ok >= 2 && s.frames_failed == 0, "{} ✓ {} ✗", s.frames_ok, s.frames_failed);
     }
 
-    /// Sentetik sinyali SigMF olarak yazar (qoda-analyze ile incelemek için):
-    /// `QODA_SYNTH_OUT=yol QODA_SYNTH_CODE=17 QODA_SYNTH_SNR=-1 cargo test --lib write_synthetic -- --ignored`
+    /// Writes the synthetic signal as SigMF (for inspection with qoda-analyze):
+    /// `QODA_SYNTH_OUT=path QODA_SYNTH_CODE=17 QODA_SYNTH_SNR=-1 cargo test --lib write_synthetic -- --ignored`
     #[test]
     #[ignore]
     fn write_synthetic_sigmf() {
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn decodes_synthetic_16apsk() {
-        // 16APSK 3/4, kısa çerçeve, pilotlu.
+        // 16APSK 3/4, short frame, with pilots.
         let s = decode(&synthetic_frames((19 << 2) | 3, 14), 5.5);
         assert!(s.frames_ok >= 4 && s.frames_failed == 0, "{} ✓ {} ✗", s.frames_ok, s.frames_failed);
     }

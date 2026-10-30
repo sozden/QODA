@@ -1,8 +1,8 @@
-//! MPEG-TS içindeki DVB tablolarından yayın bilgisi çıkarma.
+//! Extracting service information from the DVB tables in an MPEG-TS.
 //!
-//! ISO/IEC 13818-1 (PAT, PMT) ve ETSI EN 300 468 (SDT, servis tanımlayıcısı):
-//! PAT program numarasından PMT PID'ini, PMT video/ses akışlarının türünü,
-//! SDT ise servis adını ve sağlayıcıyı verir.
+//! ISO/IEC 13818-1 (PAT, PMT) and ETSI EN 300 468 (SDT, service descriptor):
+//! the PAT gives the PMT PID from the program number, the PMT the types of the
+//! video/audio streams, and the SDT the service name and provider.
 
 use std::collections::HashMap;
 
@@ -10,7 +10,7 @@ const PID_PAT: u16 = 0x0000;
 const PID_SDT: u16 = 0x0011;
 const TABLE_PAT: u8 = 0x00;
 const TABLE_PMT: u8 = 0x02;
-/// SDT, bu taşıma akışı için ("actual").
+/// SDT for this transport stream ("actual").
 const TABLE_SDT: u8 = 0x42;
 const SERVICE_DESCRIPTOR: u8 = 0x48;
 
@@ -18,12 +18,12 @@ const SERVICE_DESCRIPTOR: u8 = 0x48;
 pub struct ServiceInfo {
     pub name: Option<String>,
     pub provider: Option<String>,
-    /// PMT'deki temel akışlar: (PID, akış türü kodu).
+    /// Elementary streams in the PMT: (PID, stream type code).
     pub streams: Vec<(u16, u8)>,
 }
 
 impl ServiceInfo {
-    /// Tanınan akışların kodek adı ve türü, PMT sırasıyla.
+    /// Codec name and kind of the recognized streams, in PMT order.
     pub fn stream_list(&self) -> Vec<(&'static str, StreamKind)> {
         self.streams.iter().filter_map(|&(_, t)| stream_type(t)).collect()
     }
@@ -36,7 +36,7 @@ pub enum StreamKind {
     Data,
 }
 
-/// ISO/IEC 13818-1 ve yaygın DVB akış türü kodları: (kodek adı, tür).
+/// ISO/IEC 13818-1 and common DVB stream type codes: (codec name, kind).
 pub fn stream_type(code: u8) -> Option<(&'static str, StreamKind)> {
     use StreamKind::*;
     Some(match code {
@@ -54,10 +54,10 @@ pub fn stream_type(code: u8) -> Option<(&'static str, StreamKind)> {
     })
 }
 
-/// TS paketlerini izleyip PSI/SI bölümlerini yeniden kurar.
+/// Follows TS packets and rebuilds PSI/SI sections.
 #[derive(Default)]
 pub struct TsInfo {
-    /// PID başına yarım kalmış bölüm.
+    /// Partial section per PID.
     sections: HashMap<u16, Vec<u8>>,
     pmt_pid: Option<u16>,
     info: ServiceInfo,
@@ -68,7 +68,7 @@ impl TsInfo {
         &self.info
     }
 
-    /// 188 baytlık TS paketlerini işler.
+    /// Processes 188-byte TS packets.
     pub fn push(&mut self, packets: &[u8]) {
         for p in packets.chunks_exact(188) {
             let pid = (((p[1] & 0x1F) as u16) << 8) | p[2] as u16;
@@ -88,7 +88,7 @@ impl TsInfo {
                 payload = &payload[len..];
             }
             if p[1] & 0x40 != 0 {
-                // Yeni bölüm başlıyor; işaretçi alanı önceki bölümün devamını atlar.
+                // A new section starts; the pointer field skips the continuation of the previous section.
                 let pointer = payload[0] as usize;
                 if let Some(prev) = self.sections.get_mut(&pid) {
                     prev.extend_from_slice(payload.get(1..1 + pointer).unwrap_or(&[]));
@@ -128,7 +128,7 @@ impl TsInfo {
     }
 
     fn parse_pat(&mut self, s: &[u8]) {
-        // 8 baytlık başlıktan sonra 4'er baytlık (program, PID) çiftleri, sonda CRC.
+        // After the 8-byte header, 4-byte (program, PID) pairs, CRC at the end.
         for entry in s[8..s.len() - 4].chunks_exact(4) {
             let program = u16::from_be_bytes([entry[0], entry[1]]);
             let pid = (((entry[2] & 0x1F) as u16) << 8) | entry[3] as u16;
@@ -181,8 +181,8 @@ impl TsInfo {
     }
 }
 
-/// EN 300 468 Ek A metni: ilk bayt 0x20'den küçükse karakter kümesi seçicidir.
-/// 0x15 UTF-8 demektir; diğerleri Latin tabanlı kümeler olarak okunur.
+/// EN 300 468 Annex A text: if the first byte is below 0x20 it selects the character set.
+/// 0x15 means UTF-8; others are read as Latin-based sets.
 fn dvb_text(bytes: &[u8]) -> String {
     let (utf8, body) = match bytes.first() {
         Some(0x15) => (true, &bytes[1..]),
@@ -193,14 +193,14 @@ fn dvb_text(bytes: &[u8]) -> String {
     let text = if utf8 {
         String::from_utf8_lossy(body).into_owned()
     } else {
-        // 0x80–0x9F denetim kodlarıdır (vurgu vb.); atlanır.
+        // 0x80–0x9F are control codes (emphasis etc.); skipped.
         body.iter().filter(|&&b| !(0x80..=0x9F).contains(&b)).map(|&b| b as char).collect()
     };
     text.trim().to_string()
 }
 
-/// MPEG-2 CRC-32 (çokterim 0x04C11DB7, başlangıç 0xFFFFFFFF). CRC dahil
-/// bütün bölüm üzerinde hesaplandığında sonuç 0 olur.
+/// MPEG-2 CRC-32 (polynomial 0x04C11DB7, initial value 0xFFFFFFFF). Computed over
+/// the whole section including the CRC, the result is 0.
 fn crc32_mpeg(data: &[u8]) -> u32 {
     data.iter().fold(0xFFFF_FFFFu32, |mut crc, &b| {
         crc ^= (b as u32) << 24;
@@ -215,7 +215,7 @@ fn crc32_mpeg(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
-    /// Bölüme uzunluk ve CRC ekler.
+    /// Adds length and CRC to a section.
     fn section(table: u8, body: &[u8]) -> Vec<u8> {
         let len = body.len() + 4;
         let mut s = vec![table, 0xB0 | (len >> 8) as u8, len as u8];
@@ -225,7 +225,7 @@ mod tests {
         s
     }
 
-    /// Bölümü tek bir TS paketine yerleştirir.
+    /// Places a section in a single TS packet.
     fn packet(pid: u16, sec: &[u8]) -> Vec<u8> {
         let mut p = vec![0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x10, 0x00];
         p.extend_from_slice(sec);
@@ -237,12 +237,12 @@ mod tests {
     fn reads_service_name_and_streams() {
         // PAT: program 1 → PMT PID 0x100.
         let pat = section(TABLE_PAT, &[0xAA, 0xAA, 0xC1, 0, 0, 0x00, 0x01, 0xE1, 0x00]);
-        // PMT: PCR PID 0x103, H.264 0x101 ve MPEG-1 ses 0x102.
+        // PMT: PCR PID 0x103, H.264 0x101 and MPEG-1 audio 0x102.
         let pmt = section(
             TABLE_PMT,
             &[0, 1, 0xC1, 0, 0, 0xE1, 0x03, 0xF0, 0, 0x1B, 0xE1, 0x01, 0xF0, 0, 0x03, 0xE1, 0x02, 0xF0, 0],
         );
-        // SDT: servis 1, sağlayıcı "QARS", ad "A71A".
+        // SDT: service 1, provider "QARS", name "A71A".
         let desc = [SERVICE_DESCRIPTOR, 11, 0x01, 4, b'Q', b'A', b'R', b'S', 4, b'A', b'7', b'1', b'A'];
         let mut sdt_body = vec![0xAA, 0xAA, 0xC1, 0, 0, 0xFF, 0x01, 0xFF];
         sdt_body.extend_from_slice(&[0x00, 0x01, 0xFC, 0x80, desc.len() as u8]);

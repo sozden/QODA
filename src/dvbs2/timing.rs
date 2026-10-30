@@ -1,10 +1,10 @@
-//! Gardner zamanlama hatası dedektörü ile sembol zamanlaması kurtarma.
+//! Symbol timing recovery with a Gardner timing error detector.
 //!
-//! Eşleştirilmiş filtreden geçmiş örneklerden, kesirli enterpolasyonla her
-//! sembolün tam ortasındaki değeri üretir. Gardner dedektörü sembol başına iki
-//! noktaya (sembol anı ve iki sembol arasının ortası) ihtiyaç duyar; bunları
-//! enterpolatör verdiği için sembol başına örnek sayısı tam sayı olmak zorunda
-//! değildir (ör. 2.4 MS/s / 1.5 MS/s = 1.6).
+//! From matched-filtered samples, produces the value at the exact centre of each
+//! symbol by fractional interpolation. The Gardner detector needs two points per
+//! symbol (the symbol instant and the midpoint between two symbols); since the
+//! interpolator provides them, the number of samples per symbol need not be an
+//! integer (e.g. 2.4 MS/s / 1.5 MS/s = 1.6).
 
 use num_complex::Complex;
 
@@ -12,25 +12,25 @@ use super::filters::Interpolator;
 
 pub struct TimingResult {
     pub symbols: Vec<Complex<f32>>,
-    /// Döngünün sonundaki sembol periyodu tahmini (örnek cinsinden).
+    /// Symbol period estimate at the end of the loop (in samples).
     pub final_period: f64,
 }
 
-/// İkinci dereceden döngü filtresi kazançları (oransal, integral).
-/// `bn` sembol hızına göre normalize döngü bant genişliği.
+/// Second-order loop filter gains (proportional, integral).
+/// `bn` is the loop bandwidth normalized to the symbol rate.
 fn loop_gains(bn: f64, damping: f64) -> (f64, f64) {
     let theta = bn / (damping + 1.0 / (4.0 * damping));
     let d = 1.0 + 2.0 * damping * theta + theta * theta;
     (4.0 * damping * theta / d, 4.0 * theta * theta / d)
 }
 
-/// Parça parça gelen örneklerle çalışan zamanlama kurtarıcı.
+/// Timing recovery working on samples that arrive in chunks.
 pub struct TimingRecovery {
     ip: Interpolator,
     sps: f64,
     kp: f64,
     ki: f64,
-    /// İşlenmeyi bekleyen örnekler; `t` bu tampona göre kesirli konumdur.
+    /// Samples waiting to be processed; `t` is a fractional position in this buffer.
     buf: Vec<Complex<f32>>,
     t: f64,
     integ: f64,
@@ -38,7 +38,7 @@ pub struct TimingRecovery {
 }
 
 impl TimingRecovery {
-    /// `sps`: nominal sembol başına örnek. `bn`: döngü bant genişliği (ör. 0.005).
+    /// `sps`: nominal samples per symbol. `bn`: loop bandwidth (e.g. 0.005).
     pub fn new(sps: f64, bn: f64) -> Self {
         let (kp, ki) = loop_gains(bn, 0.707);
         Self {
@@ -53,20 +53,20 @@ impl TimingRecovery {
         }
     }
 
-    /// Şu anki sembol periyodu tahmini (örnek cinsinden).
+    /// Current symbol period estimate (in samples).
     pub fn period(&self) -> f64 {
         self.sps + self.integ
     }
 
-    /// `x`: birim güce yakın, eşleştirilmiş filtreden geçmiş örnekler.
-    /// Üretilen semboller `out`a eklenir.
+    /// `x`: matched-filtered samples near unit power.
+    /// Produced symbols are appended to `out`.
     pub fn process(&mut self, x: &[Complex<f32>], out: &mut Vec<Complex<f32>>) {
         self.buf.extend_from_slice(x);
         let buf = &self.buf;
         while let (Some(on), Some(mid)) = (self.ip.at(buf, self.t), self.ip.at(buf, self.t - self.period() / 2.0)) {
             let mut step = self.period();
             if let Some(p) = self.prev {
-                // Gardner: e > 0 ise örnekleme erken, bir sonraki anı ileri al.
+                // Gardner: if e > 0 sampling is early; move the next instant forward.
                 let e = ((p - on) * mid.conj()).re as f64;
                 let e = e.clamp(-1.0, 1.0);
                 self.integ += self.sps * self.ki * e;
@@ -76,7 +76,7 @@ impl TimingRecovery {
             out.push(on);
             self.t += step;
         }
-        // Enterpolatörün ihtiyaç duyacağı kadar geçmişi tutup gerisini at.
+        // Keep as much history as the interpolator needs and drop the rest.
         let keep_from = (self.t - self.sps - Interpolator::TAPS as f64).floor().max(0.0) as usize;
         let keep_from = keep_from.min(self.buf.len());
         self.buf.drain(..keep_from);
@@ -84,8 +84,8 @@ impl TimingRecovery {
     }
 }
 
-/// `x`: birim güce normalize, eşleştirilmiş filtreden geçmiş örnekler.
-/// `sps`: nominal sembol başına örnek. `bn`: döngü bant genişliği (ör. 0.005).
+/// `x`: matched-filtered samples normalized to unit power.
+/// `sps`: nominal samples per symbol. `bn`: loop bandwidth (e.g. 0.005).
 pub fn recover(x: &[Complex<f32>], sps: f64, bn: f64) -> TimingResult {
     let mut tr = TimingRecovery::new(sps, bn);
     let mut symbols = Vec::with_capacity((x.len() as f64 / sps) as usize + 1);
@@ -98,7 +98,7 @@ pub(crate) mod tests {
     use super::super::filters::{filter, normalize, rrc_pulse, rrc_taps};
     use super::*;
 
-    /// Basit doğrusal eşlenik üreteci; testlerin tekrarlanabilir olması için.
+    /// Simple linear congruential generator, so tests are repeatable.
     pub(crate) struct Lcg(pub u64);
     impl Lcg {
         pub(crate) fn next_bit(&mut self) -> u8 {
@@ -107,8 +107,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Verilen sembolleri RRC darbesiyle, `sps` (kesirli) örnek hızında ve
-    /// `delay` sembol gecikmeyle örnekler.
+    /// Samples the given symbols with an RRC pulse at a (fractional) rate of `sps`
+    /// samples per symbol with a delay of `delay` symbols.
     pub(crate) fn shape(symbols: &[Complex<f32>], sps: f64, rolloff: f64, delay: f64) -> Vec<Complex<f32>> {
         let n = ((symbols.len() as f64 + 16.0) * sps) as usize;
         (0..n)
@@ -142,7 +142,7 @@ pub(crate) mod tests {
         let mut x = filter(&shape(&tx, sps, 0.2, 0.37), &rrc_taps(sps, 0.2, 8));
         normalize(&mut x);
         let r = recover(&x, sps, 0.005);
-        // Döngü oturduktan sonraki sembollerde QPSK noktalarına uzaklık küçük olmalı.
+        // Once the loop settles, the distance to the QPSK points must be small.
         let tail = &r.symbols[r.symbols.len() / 2..r.symbols.len() - 20];
         let rms = (tail.iter().map(|z| z.norm_sqr()).sum::<f32>() / tail.len() as f32).sqrt();
         let evm = (tail
@@ -158,7 +158,7 @@ pub(crate) mod tests {
         assert!(evm < 0.1, "EVM {evm}");
         assert!((r.final_period - sps).abs() < 0.01, "periyot {}", r.final_period);
 
-        // Parça parça işleme aynı sembolleri üretmeli.
+        // Processing in chunks must produce the same symbols.
         let mut tr = TimingRecovery::new(sps, 0.005);
         let mut chunked = Vec::new();
         for part in x.chunks(777) {

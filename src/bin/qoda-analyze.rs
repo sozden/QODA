@@ -1,6 +1,6 @@
-//! Bir SigMF kaydında DVB-S2 çerçeve başlıklarını arar ve sinyalleşmeyi raporlar.
+//! Searches a SigMF recording for DVB-S2 frame headers and reports the signalling.
 //!
-//! Kullanım: qoda-analyze <kayıt> [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]
+//! Usage: qoda-analyze <recording> [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,10 +14,10 @@ use qoda::dvbs2::modulation::Mapping;
 use qoda::dvbs2::{filters, plframe, plheader, timing};
 
 const SOF_THRESHOLD: f32 = 0.7;
-/// Bu PLS güveninin altındaki başlıklar yanlış alarm sayılır.
+/// Headers below this PLS confidence count as false alarms.
 const MIN_PLS_MARGIN: f32 = 0.2;
 const TIMING_BANDWIDTH: f64 = 0.005;
-/// Çerçeve gövdesindeki taşıyıcı takip döngüsünün bant genişliği.
+/// Bandwidth of the carrier tracking loop in the frame body.
 const CARRIER_BANDWIDTH: f32 = 0.002;
 const LDPC_MAX_ITERATIONS: usize = 50;
 
@@ -25,16 +25,16 @@ struct Args {
     path: PathBuf,
     seconds: Option<f64>,
     symbol_rate: Option<f64>,
-    /// Çözülecek yayının RF frekansı (Hz); verilmezse kaydın ortası.
+    /// RF frequency (Hz) of the signal to decode; the middle of the recording if not given.
     freq: Option<f64>,
-    /// Yalnızca kayıttaki yayınları listele.
+    /// Only list the signals in the recording.
     scan: bool,
-    /// Kaba spektrum profilini yazdır.
+    /// Print a coarse spectrum profile.
     profile: bool,
     rolloff: Option<f64>,
-    /// Kaydı akış alıcısından parça parça geçir (canlı çözümü sınamak için).
+    /// Feed the recording through the streaming receiver in chunks (to test live decoding).
     stream: bool,
-    /// Sınama için eklenen gürültünün, kaydın ortalama gücüne oranı (dB).
+    /// Ratio of the noise added for testing to the recording's mean power (dB).
     noise_db: Option<f64>,
 }
 
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
-    let max = args.seconds.map(|s| s as usize); // aşağıda örnek sayısına çevrilir
+    let max = args.seconds.map(|s| s as usize); // converted to a sample count below
     let rec = qoda::sigmf::read(&args.path, None).map_err(|e| format!("{}: {e}", args.path.display()))?;
     let fs = rec.sample_rate;
     let mut x = rec.samples;
@@ -95,7 +95,7 @@ fn run() -> Result<(), String> {
         rec.frequency / 1e6
     );
 
-    // 1. Spektrumdan yayının merkezini ve sembol hızını bul.
+    // 1. Find the signal's centre and symbol rate from the spectrum.
     let mut spectrum = Spectrum::new(4096);
     let db = spectrum.compute(&x[..x.len().min(fs as usize)]);
     let n = db.len();
@@ -131,7 +131,7 @@ fn run() -> Result<(), String> {
         return run_stream(&x, fs, found.center_offset_hz, rs, rolloff, &args.path.with_extension("stream.ts"));
     }
 
-    // 2. Merkeze indir, RRC eşleştirilmiş filtre, zamanlama kurtarma.
+    // 2. Mix down to the centre, RRC matched filter, timing recovery.
     filters::mix_down(&mut x, found.center_offset_hz, fs);
     let sps = fs / rs;
     let mut y = filters::filter(&x, &filters::rrc_taps(sps, rolloff, 8));
@@ -144,7 +144,7 @@ fn run() -> Result<(), String> {
         sps
     );
 
-    // 3. Çerçeve başlıklarını ara. Bulunamazsa spektrum ters olabilir; eşleniği dene.
+    // 3. Search for frame headers. If none is found the spectrum may be inverted; try the conjugate.
     let mut symbols = t.symbols;
     let mut hits = plheader::find_headers(&symbols, SOF_THRESHOLD);
     if hits.is_empty() {
@@ -159,7 +159,7 @@ fn run() -> Result<(), String> {
         return Err("no DVB-S2 frame header found".into());
     }
 
-    // İkinci geçiş: güvenilir başlıkların ortanca frekans kaymasını tüm sembollerden çıkar.
+    // Second pass: remove the median frequency offset of reliable headers from all symbols.
     let mut ws: Vec<f32> = hits.iter().filter(|h| h.pls_margin > 0.5).map(|h| h.freq_rad_per_symbol).collect();
     ws.sort_by(f32::total_cmp);
     let residual_w = ws.get(ws.len() / 2).copied().unwrap_or(0.0);
@@ -199,7 +199,7 @@ fn run() -> Result<(), String> {
         );
     }
 
-    // Özet: en sık görülen sinyalleşme ve çerçeve aralıklarının tutarlılığı.
+    // Summary: most common signalling and consistency of frame spacing.
     let mut counts: Vec<(plheader::Pls, usize)> = Vec::new();
     for h in &hits {
         match counts.iter_mut().find(|(p, _)| *p == h.pls) {
@@ -226,19 +226,19 @@ fn run() -> Result<(), String> {
     decode_frames(&llrs, &args.path.with_extension("ts"))
 }
 
-/// QPSK çerçevelerinin gövdelerini çözüp gövde boyunca SNR'ı raporlar.
+/// Demodulates the bodies of QPSK frames and reports the SNR along the body.
 fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(plheader::Pls, Vec<f32>)> {
     let mut scrambling: Vec<u8> = Vec::new();
     let mut snrs = Vec::new();
     let mut llrs = Vec::new();
-    // Başlık başına frekans tahmini gürültülü; ortak kayma için ortancayı kullan.
+    // Per-header frequency estimates are noisy; use the median for the common offset.
     let mut ws: Vec<f32> = hits.iter().map(|h| h.freq_rad_per_symbol).collect();
     ws.sort_by(f32::total_cmp);
     let common_w = ws[ws.len() / 2];
     for h in hits {
         let Some((modulation, rate)) = h.pls.modulation_and_rate() else { continue };
         let qpsk = modulation == plheader::Modulation::Qpsk;
-        // 32APSK henüz desteklenmiyor.
+        // 32APSK is not supported yet.
         let mapping = if qpsk { None } else { Mapping::new(modulation, rate) };
         let Some(len) = h.pls.frame_len() else { continue };
         let body_len = len - plheader::HEADER_LEN;
@@ -251,12 +251,12 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         }
         let carrier = plframe::body_start(h.phase, common_w);
         let body = &symbols[start..start + body_len];
-        // Gövdeyi dörde bölüp her parçadaki SNR'a bak: takip kaçarsa sonlara doğru düşer.
+        // Split the body into quarters and look at each one's SNR: it drops towards the end if tracking slips.
         let out = match &mapping {
             None => plframe::demap_qpsk(body, &scrambling[..body_len], h.pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH),
             Some(map) => plframe::demap(body, &scrambling[..body_len], h.pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH, map),
         };
-        // Pilotlar LLR'ye girmez; çeyrekler veri bitleri üzerinden alınır.
+        // Pilots are not part of the LLRs; quarters are taken over the data bits.
         let quarter = out.llr.len() / 4;
         let parts: Vec<f32> = (0..4)
             .map(|i| {
@@ -285,7 +285,7 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
     llrs
 }
 
-/// LDPC ve BCH ile hata düzeltme, BBFRAME'den MPEG-TS çıkarma; TS'yi `ts_path`e yazar.
+/// Error correction with LDPC and BCH, MPEG-TS extraction from BBFRAMEs; writes the TS to `ts_path`.
 fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path) -> Result<(), String> {
     let Some((pls, _)) = frames.first() else { return Ok(()) };
     let (_, rate) = pls.modulation_and_rate().ok_or("unknown MODCOD")?;
@@ -345,7 +345,7 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
     info.push(&ts);
     print_service(info.info());
 
-    // PID başına paket sayısı ve süreklilik sayacı (CC) kopuklukları.
+    // Packet count per PID and continuity counter (CC) discontinuities.
     let mut pids: Vec<(u16, usize, usize)> = Vec::new();
     let mut last_cc: std::collections::HashMap<u16, u8> = Default::default();
     for p in ts.chunks_exact(188) {
@@ -355,7 +355,7 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
         let mut gap = 0;
         if pid != 0x1FFF && has_payload {
             if let Some(&prev) = last_cc.get(&pid) {
-                // Aynı CC'li tekrar paketine izin verilir.
+                // A repeated packet with the same CC is allowed.
                 if cc != (prev + 1) % 16 && cc != prev {
                     gap = 1;
                 }
@@ -386,7 +386,7 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
     Ok(())
 }
 
-/// Kaydı canlı alıcıdaki gibi küçük parçalarla akış alıcısına verir.
+/// Feeds the recording to the streaming receiver in small chunks, as the live receiver does.
 fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64, ts_path: &std::path::Path) -> Result<(), String> {
     use qoda::dvbs2::receiver::{Receiver, ReceiverConfig};
     let mut rx = Receiver::new(ReceiverConfig { sample_rate: fs, offset_hz, symbol_rate: rs, rolloff });
@@ -423,7 +423,7 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
     Ok(())
 }
 
-/// Örneklere, ortalama güçlerine göre `db` seviyesinde karmaşık Gauss gürültüsü ekler.
+/// Adds complex Gaussian noise at `db` relative to the samples' mean power.
 fn add_noise(x: &mut [Complex<f32>], db: f64) {
     let power = x.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / x.len() as f64;
     let sigma = (power * 10f64.powf(db / 10.0) / 2.0).sqrt();
@@ -443,7 +443,7 @@ fn add_noise(x: &mut [Complex<f32>], db: f64) {
     }
 }
 
-/// Spektrumu 40 dilimde (ortalama dB) çubuk grafik olarak yazdırır.
+/// Prints the spectrum in 40 slices (mean dB) as a bar chart.
 fn print_profile(db: &[f32], fs: f64, center_hz: f64) {
     let slices = 40;
     let per = db.len() / slices;
@@ -455,7 +455,7 @@ fn print_profile(db: &[f32], fs: f64, center_hz: f64) {
     }
 }
 
-/// Spektrumdaki bütün yayınları parametreleriyle yazdırır.
+/// Prints every signal in the spectrum with its parameters.
 fn print_scan(db: &[f32], fs: f64, center_hz: f64) {
     println!("{:>12} {:>10} {:>9} {:>7}", "RF MHz", "kS/s", "roll-off", "SNR dB");
     for d in detect::scan(db, fs) {

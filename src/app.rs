@@ -1,5 +1,5 @@
-//! QODA ana penceresi: sol panelde alıcı, frekans, yayın ve izleme kartları;
-//! ortada gömülü video, spektrum ve şelale.
+//! QODA main window: receiver, frequency, signal and watch cards on the left;
+//! embedded video, spectrum and waterfall in the middle.
 
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, FontId, Mesh, Pos2, Rect, RichText, Sense, Shape,
@@ -19,25 +19,25 @@ use qoda::tuning;
 
 const FFT_SIZE: usize = 2048;
 const WATERFALL_ROWS: usize = 300;
-/// Spektrum çizgisinin üstel ortalama katsayısı.
+/// Exponential averaging factor of the spectrum line.
 const SMOOTHING: f32 = 0.35;
-/// Kayıtların yazıldığı klasör (çalışma klasörüne göre).
+/// Folder recordings are written to (relative to the working directory).
 const RECORDINGS_DIR: &str = "recordings";
 const ROLLOFFS: [f32; 3] = [0.35, 0.25, 0.20];
-/// Üst bardaki logo dokusunun piksel boyutu (yüksek DPI için çizim boyutunun katı).
+/// Pixel size of the header logo texture (a multiple of the drawn size for high DPI).
 const LOGO_PIXELS: usize = 128;
-/// İzleme sürerken frekans değişince çözücünün yeniden başlaması için beklenen sessizlik.
+/// Quiet time before the decoder restarts after the frequency changes while watching.
 const RESTART_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
-/// Spektrumda fare tekerleğinin bir adımı (MHz); Shift ile 10 katı.
+/// One mouse wheel step on the spectrum (MHz); 10× with Shift.
 const WHEEL_STEP_MHZ: f64 = 0.010;
-/// Yayın şeridi bu kadar spektrum karesinde bir yenilenir.
+/// The signals strip is refreshed once every this many spectrum frames.
 const SCAN_EVERY_FRAMES: u32 = 12;
-/// QO-100 geniş bant transponderinin merkezi (10491–10499.5 MHz).
+/// Centre of the QO-100 wideband transponder (10491–10499.5 MHz).
 const WIDEBAND_CENTER_MHZ: f64 = 10495.25;
-/// Geniş bant görünümü için gereken en düşük örnekleme hızı (MS/s).
+/// Lowest sample rate needed for the wideband view (MS/s).
 const WIDEBAND_MIN_RATE: f64 = 10.0;
 
-/// Renk paleti.
+/// Colour palette.
 mod palette {
     use eframe::egui::Color32;
     pub const BG: Color32 = Color32::from_rgb(11, 15, 22);
@@ -54,7 +54,7 @@ mod palette {
 }
 use palette::*;
 
-/// Durum çubuğundaki ileti; seçili dilde gösterilir.
+/// Status bar message; shown in the selected language.
 enum Status {
     NoDevice,
     DevicesFound(usize),
@@ -69,46 +69,46 @@ pub struct QodaApp {
     lang: Lang,
     devices: Vec<DeviceInfo>,
     device_index: usize,
-    /// Eklenen ağ alıcılarının libiio URI'leri (kaydedilir).
+    /// libiio URIs of added network receivers (saved).
     network_devices: Vec<String>,
-    /// Ağ alıcısı ekleme kutusundaki metin.
+    /// Text in the add-network-receiver box.
     network_input: String,
     handle: Option<sdr::Handle>,
     status: Status,
 
     lo_mhz: f64,
-    /// Alıcının ayarlandığı RF merkez frekansı.
+    /// RF centre frequency the receiver is tuned to.
     center_mhz: f64,
-    /// Spektrumda seçili yayının RF frekansı.
+    /// RF frequency of the signal selected on the spectrum.
     selected_mhz: f64,
     symbol_rate_ks: f32,
     rolloff: f32,
     sample_rate_ms: f64,
     auto_gain: bool,
     gain_db: f64,
-    /// İzlerken sesi de çal.
+    /// Also play audio while watching.
     audio: bool,
 
     detection: Option<Detection>,
-    /// Canlı DVB-S2 çözücü (izleme sürerken).
+    /// Live DVB-S2 decoder (while watching).
     decoder: Option<Decoder>,
     video_tex: Option<TextureHandle>,
     video_seq: u64,
-    /// Ayarların en son uydurulduğu cihaz türü.
+    /// Device kind the settings were last fitted to.
     fitted_kind: Option<DeviceKind>,
-    /// Süren kaydın yolu ve yazılan örnek sayısı.
+    /// Path of the running recording and the number of samples written.
     recording: Option<(std::path::PathBuf, u64)>,
 
     last_frame: Option<Frame>,
     smoothed: Vec<f32>,
-    /// Görüntülenen dB aralığı (alt, üst); otomatik izlenir.
+    /// Displayed dB range (low, high); tracked automatically.
     range: (f32, f32),
     waterfall: ColorImage,
     waterfall_tex: Option<TextureHandle>,
     logo_tex: TextureHandle,
-    /// İzlerken frekans değişti; bu andan RESTART_DELAY sonra çözücü yeniden başlar.
+    /// Frequency changed while watching; the decoder restarts RESTART_DELAY after this moment.
     pending_restart: Option<std::time::Instant>,
-    /// Görünen bantta bulunan yayınlar: (RF MHz, sembol hızı kS/s, roll-off).
+    /// Signals found in the visible band: (RF MHz, symbol rate kS/s, roll-off).
     signals: Vec<(f64, f32, f32)>,
     frames_since_scan: u32,
 }
@@ -189,8 +189,8 @@ impl QodaApp {
         self.devices.get(self.device_index).map_or(DeviceKind::Soapy, |d| d.kind)
     }
 
-    /// Örnekleme hızını ve kazancı seçili cihazın sınırlarına uydurur; cihaz türü
-    /// değiştiyse o türün varsayılan hızına ve kazancına geçer.
+    /// Fits the sample rate and gain to the selected device's limits; if the device
+    /// kind changed, switches to that kind's default rate and gain.
     fn fit_to_device(&mut self) {
         let kind = self.device_kind();
         let changed = self.fitted_kind != Some(kind);
@@ -205,15 +205,15 @@ impl QodaApp {
         }
     }
 
-    /// Alıcıyı `mhz`deki yayını gösterecek şekilde ayarla; DC tepesi belirgin
-    /// alıcılarda yayın merkezin biraz yanında kalır.
+    /// Tunes the receiver to show the signal at `mhz`; on receivers with a strong
+    /// DC spike the signal is kept slightly off centre.
     fn center_on(&mut self, ctx: &egui::Context, mhz: f64) {
         let offset = self.device_kind().center_offset_mhz(self.occupied_khz() as f64 / 1000.0);
         self.retune(ctx, ((mhz + offset) * 1000.0).round() / 1000.0);
     }
 
-    /// Geniş bant transponderinin tamamını göster: cihazın en yüksek hızına geç
-    /// ve transponderin ortasına ayarla.
+    /// Shows the whole wideband transponder: switches to the device's highest rate
+    /// and tunes to the middle of the transponder.
     fn wideband_view(&mut self, ctx: &egui::Context) {
         let Some(&rate) = self.device_kind().sample_rates().last() else { return };
         if rate < WIDEBAND_MIN_RATE {
@@ -286,14 +286,14 @@ impl QodaApp {
         self.schedule_restart();
     }
 
-    /// İzleme sürüyorsa, ayarlar durulunca çözücüyü yeni ayarla başlatmak üzere işaretle.
+    /// While watching, marks the decoder to restart with the new settings once they settle.
     fn schedule_restart(&mut self) {
         if self.decoder.is_some() {
             self.pending_restart = Some(std::time::Instant::now());
         }
     }
 
-    /// Seçili yayın değişti: görünür bandın dışına çıktıysa alıcıyı ortala.
+    /// The selected signal changed: recentre the receiver if it left the visible band.
     fn selection_changed(&mut self, ctx: &egui::Context) {
         let (center, span) = self.frame_span();
         if (self.selected_mhz - center).abs() > span * 0.42 {
@@ -303,7 +303,7 @@ impl QodaApp {
         }
     }
 
-    /// Yayın şeridinden ya da otomatik tespitten gelen yayını seç.
+    /// Selects a signal from the signals strip or from automatic detection.
     fn select_signal(&mut self, ctx: &egui::Context, mhz: f64, symbol_rate_ks: f32, rolloff: f32) {
         self.selected_mhz = mhz;
         self.symbol_rate_ks = symbol_rate_ks;
@@ -311,13 +311,13 @@ impl QodaApp {
         self.selection_changed(ctx);
     }
 
-    /// Seçili yayını canlı çözmeye ve videoyu göstermeye başlar.
+    /// Starts decoding the selected signal live and showing its video.
     fn start_watch(&mut self, ctx: &egui::Context) {
         self.stop_watch();
         if self.handle.is_none() {
             return;
         }
-        // Yayın, alıcının DC tepesinin üstündeyse önce alıcıyı yana kaydır.
+        // If the signal sits on the receiver's DC spike, shift the receiver aside first.
         let half = self.occupied_khz() as f64 / 2000.0;
         let offset = self.device_kind().center_offset_mhz(half * 2.0);
         if offset > 0.0 && (self.selected_mhz - self.center_mhz).abs() < half + 0.1 {
@@ -396,7 +396,7 @@ impl QodaApp {
             }
         }
 
-        // Görüntü aralığını gürültü tabanı ve tepe değerine göre yavaşça izle.
+        // Slowly track the display range from the noise floor and the peak.
         let mut sorted = self.smoothed.clone();
         sorted.sort_by(f32::total_cmp);
         let floor = sorted[sorted.len() / 10] - 5.0;
@@ -409,7 +409,7 @@ impl QodaApp {
             self.range.1 += 0.1 * (top - self.range.1);
         }
 
-        // Şelaleyi bir satır aşağı kaydırıp en üste yeni satırı yaz.
+        // Scroll the waterfall down one row and write the new row at the top.
         let w = self.waterfall.size[0];
         self.waterfall.pixels.copy_within(0..w * (WATERFALL_ROWS - 1), w);
         let (lo, hi) = self.range;
@@ -428,7 +428,7 @@ impl QodaApp {
         }
     }
 
-    /// Görünen bantta bulunan yayınlar.
+    /// Signals found in the visible band.
     fn scan_signals(&self) -> Vec<(f64, f32, f32)> {
         let (center, span) = self.frame_span();
         detect::scan(&self.smoothed, span * 1e6)
@@ -438,14 +438,14 @@ impl QodaApp {
             .collect()
     }
 
-    /// Son karenin RF merkezi ve genişliği (MHz).
+    /// RF centre and width of the last frame (MHz).
     fn frame_span(&self) -> (f64, f64) {
         self.last_frame.as_ref().map_or((self.center_mhz, self.sample_rate_ms), |f| {
             (f.if_hz / 1e6 + self.lo_mhz, f.sample_rate / 1e6)
         })
     }
 
-    /// `mhz` civarındaki yayını spektrumdan bulup yayın ayarlarını doldurur.
+    /// Finds the signal near `mhz` on the spectrum and fills in the signal settings.
     fn auto_detect(&mut self, mhz: f64) {
         let (center, span) = self.frame_span();
         let n = self.smoothed.len();
@@ -473,7 +473,7 @@ impl QodaApp {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        // Adda nokta olmamalı: uzantılar `with_extension` ile eklenir.
+        // No dots in the name: extensions are added with `with_extension`.
         let name = format!(
             "qoda_{:.0}kHz_{:.0}ksps_{stamp}",
             self.center_mhz * 1e3,
@@ -481,7 +481,7 @@ impl QodaApp {
         );
         let path = std::path::Path::new(RECORDINGS_DIR).join(name);
         self.send(Command::StartRecording { path, rf_hz: self.center_mhz * 1e6 });
-        // İlk olay gelene kadar düğme "kaydediyor" görünsün.
+        // Show the button as "recording" until the first event arrives.
         self.recording = Some((std::path::PathBuf::new(), 0));
     }
 
@@ -489,7 +489,7 @@ impl QodaApp {
         self.symbol_rate_ks * (1.0 + self.rolloff)
     }
 
-    // ---- Üst bar ----
+    // ---- Header ----
 
     fn header(&mut self, ui: &mut egui::Ui) {
         let t = self.t();
@@ -579,7 +579,7 @@ impl QodaApp {
         });
     }
 
-    // ---- Sol panel ----
+    // ---- Left panel ----
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -843,14 +843,14 @@ impl QodaApp {
         }
     }
 
-    // ---- Orta alan ----
+    // ---- Central area ----
 
     fn video(&self, ui: &mut egui::Ui, rect: Rect) {
         let t = self.t();
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::same(10), DEEP);
         painter.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
-        // 16:9 alanı dikdörtgene sığdır.
+        // Fit a 16:9 area into the rectangle.
         let aspect = VIDEO_WIDTH as f32 / VIDEO_HEIGHT as f32;
         let inner = rect.shrink(6.0);
         let size = if inner.width() / inner.height() > aspect {
@@ -889,7 +889,7 @@ impl QodaApp {
         }
     }
 
-    /// Spektrum ve şelaleyi çizer; tıklama yayın seçer, çift tıklama alıcıyı ortalar.
+    /// Draws the spectrum and waterfall; a click selects a signal, a double click centres the receiver.
     fn spectrum(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let tex = self
             .waterfall_tex
@@ -905,12 +905,12 @@ impl QodaApp {
         let wf_rect = Rect::from_min_max(pos2(full.left(), spec_rect.bottom() + axis_h), full.max);
         painter.image(tex.id(), wf_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
 
-        // Çizilen spektrum, karenin ayarlandığı merkeze göre konumlanır.
+        // The drawn spectrum is positioned relative to the centre the frame was tuned to.
         let (frame_center, span_mhz) = self.frame_span();
         let x_of = |mhz: f64| full.left() + ((mhz - frame_center) / span_mhz + 0.5) as f32 * full.width();
         let mhz_of = |x: f32| frame_center + ((x - full.left()) / full.width() - 0.5) as f64 * span_mhz;
 
-        // dB ızgarası.
+        // dB grid.
         let (lo, hi) = self.range;
         let y_of = |db: f32| spec_rect.bottom() - (db - lo) / (hi - lo) * spec_rect.height();
         let grid = Color32::from_rgb(26, 34, 46);
@@ -922,7 +922,7 @@ impl QodaApp {
             db += 10.0;
         }
 
-        // Frekans ekseni: işaretler arası en az ~90 piksel olacak şekilde aralık seç.
+        // Frequency axis: pick a step that leaves at least ~90 pixels between ticks.
         let min_step = span_mhz * 90.0 / full.width().max(1.0) as f64;
         let step = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0].into_iter().find(|&s| s >= min_step).unwrap_or(10.0);
         let mut f = ((frame_center - span_mhz / 2.0) / step).ceil() * step;
@@ -935,7 +935,7 @@ impl QodaApp {
             f += step;
         }
 
-        // Seçili yayının kapladığı bant.
+        // Band occupied by the selected signal.
         let half = self.occupied_khz() as f64 / 2000.0;
         let band = Rect::from_x_y_ranges(x_of(self.selected_mhz - half)..=x_of(self.selected_mhz + half), spec_rect.y_range());
         painter.rect_filled(band, CornerRadius::ZERO, BAND.gamma_multiply(0.10));
@@ -945,7 +945,7 @@ impl QodaApp {
         let sx = x_of(self.selected_mhz);
         painter.line_segment([pos2(sx, spec_rect.top()), pos2(sx, wf_rect.bottom())], Stroke::new(1.0, BAND.gamma_multiply(0.8)));
 
-        // Spektrum: altı renk geçişli dolgu, üstü çizgi.
+        // Spectrum: gradient fill below, line on top.
         if !self.smoothed.is_empty() {
             let n = self.smoothed.len();
             let points: Vec<Pos2> = self
@@ -972,7 +972,7 @@ impl QodaApp {
             painter.add(Shape::line(points, Stroke::new(1.4, ACCENT)));
         }
 
-        // Fare imleci altındaki frekans.
+        // Frequency under the mouse cursor.
         if let Some(pos) = response.hover_pos() {
             painter.line_segment([pos2(pos.x, spec_rect.top()), pos2(pos.x, wf_rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(60)));
             let label = format!("{:.3} MHz", mhz_of(pos.x));
@@ -982,13 +982,13 @@ impl QodaApp {
             painter.rect_filled(bg, CornerRadius::same(4), Color32::from_black_alpha(180));
             painter.galley(at, galley, TEXT);
         }
-        // Sürükleme alıcıyı kaydırır; seçili yayın RF'de yerinde kalır.
+        // Dragging shifts the receiver; the selected signal stays put in RF.
         if response.dragged() && response.drag_delta().x != 0.0 {
             let shift = -(response.drag_delta().x / full.width()) as f64 * span_mhz;
             let center = ((self.center_mhz + shift) * 1000.0).round() / 1000.0;
             self.retune(ui.ctx(), center);
         }
-        // Tekerlek seçili yayını adım adım kaydırır.
+        // The wheel moves the selected signal step by step.
         if response.hovered() {
             let (steps, shift) = wheel_steps(ui);
             if steps != 0 {
@@ -1013,7 +1013,7 @@ impl QodaApp {
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, Sense::hover());
         if self.decoder.is_some() {
-            // Video üstte, en fazla alanın %62'si; spektrum altta.
+            // Video on top, at most 62% of the area; spectrum below.
             let video_h = (area.width() / (VIDEO_WIDTH as f32 / VIDEO_HEIGHT as f32)).min(area.height() * 0.62);
             let video_rect = Rect::from_min_size(area.min, vec2(area.width(), video_h));
             let rest = Rect::from_min_max(pos2(area.left(), video_rect.bottom() + 8.0), area.max);
@@ -1024,7 +1024,7 @@ impl QodaApp {
         }
     }
 
-    /// Üstte bulunan yayınların şeridi, altında spektrum.
+    /// Strip of found signals on top, spectrum below.
     fn spectrum_with_signals(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let t = self.t();
         let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 30.0));
@@ -1056,7 +1056,7 @@ impl QodaApp {
         self.spectrum(ui, spec);
     }
 
-    /// Çözülen yayının servis adı ve sağlayıcısı (izleme sürerken ve okunduysa).
+    /// Service name and provider of the decoded signal (while watching, once read).
     fn service_title(&self) -> Option<(String, Option<String>)> {
         let d = self.decoder.as_ref()?;
         let service = d.status.lock().unwrap().stats.service.clone();
@@ -1107,7 +1107,7 @@ impl eframe::App for QodaApp {
     }
 }
 
-/// Başlıklı, kenarlıklı bir kart.
+/// A titled, bordered card.
 fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(CARD)
@@ -1123,9 +1123,9 @@ fn card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(10.0);
 }
 
-/// Rakam rakam ayarlanabilen frekans göstergesi (MHz, 3 ondalık). Fare
-/// tekerleği üzerindeki rakamı o basamak kadar değiştirir; rakamın üst yarısına
-/// tıklamak artırır, alt yarısına tıklamak azaltır.
+/// Frequency display tunable digit by digit (MHz, 3 decimals). The mouse
+/// wheel over a digit changes it by that digit's place; clicking the upper half
+/// of a digit increases it, clicking the lower half decreases it.
 fn freq_tuner(ui: &mut egui::Ui, mhz: &mut f64, size: f32) -> bool {
     let text = group_mhz(*mhz);
     let int_digits = text.split('.').next().unwrap_or("").chars().filter(char::is_ascii_digit).count();
@@ -1169,8 +1169,8 @@ fn freq_tuner(ui: &mut egui::Ui, mhz: &mut f64, size: f32) -> bool {
     true
 }
 
-/// Bu karedeki fare tekerleği adımları (yukarı pozitif) ve Shift basılı mı.
-/// Kullanılan kaydırma, çevredeki kaydırma alanlarına geçmesin diye tüketilir.
+/// Mouse wheel steps in this frame (up is positive) and whether Shift is held.
+/// The scroll used here is consumed so it does not reach surrounding scroll areas.
 fn wheel_steps(ui: &egui::Ui) -> (i32, bool) {
     let (steps, shift) = ui.input(|i| {
         let steps: i32 = i
@@ -1192,7 +1192,7 @@ fn wheel_steps(ui: &egui::Ui) -> (i32, bool) {
     (steps, shift)
 }
 
-/// Küçük renkli durum noktası.
+/// Small coloured status dot.
 fn dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -1206,14 +1206,14 @@ fn nearest_rolloff(r: f32) -> f32 {
         .unwrap_or(0.35)
 }
 
-/// SoapySDR cihazları ile kaydedilmiş ağ alıcıları.
+/// SoapySDR devices plus saved network receivers.
 fn all_devices(network: &[String]) -> Vec<DeviceInfo> {
     let mut devices = sdr::list_devices();
     devices.extend(network.iter().map(|uri| DeviceInfo::network(uri)));
     devices
 }
 
-/// Çerçeve sinyalleşmesinin seçili dildeki tanımı, ör. "QPSK 4/5, normal frame, no pilots".
+/// Frame signalling described in the selected language, e.g. "QPSK 4/5, normal frame, no pilots".
 fn describe_pls(p: &Pls, t: &Strings) -> String {
     let size = if p.short_frame { t.frame_short } else { t.frame_normal };
     let pilots = if p.pilots { t.pilots_on } else { t.pilots_off };
@@ -1224,7 +1224,7 @@ fn describe_pls(p: &Pls, t: &Strings) -> String {
     }
 }
 
-/// Akış türlerinin seçili dildeki listesi, ör. "H.264 video, MP2 audio".
+/// Stream types listed in the selected language, e.g. "H.264 video, MP2 audio".
 fn describe_streams(service: &ServiceInfo, t: &Strings) -> String {
     service
         .stream_list()
@@ -1241,7 +1241,7 @@ fn describe_streams(service: &ServiceInfo, t: &Strings) -> String {
         .join(", ")
 }
 
-/// "yeniden atölye" çalışma grubunun belirgin rozeti.
+/// Prominent badge of the "yeniden atölye" working group.
 fn yatolye_badge(ui: &mut egui::Ui, t: &Strings) {
     egui::Frame::new()
         .fill(BAND.gamma_multiply(0.12))
@@ -1254,7 +1254,7 @@ fn yatolye_badge(ui: &mut egui::Ui, t: &Strings) {
         });
 }
 
-/// Küçük etiketli ölçüm kutucuğu.
+/// Small labelled measurement tile.
 fn metric(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
     egui::Frame::new()
         .fill(DEEP)
@@ -1279,7 +1279,7 @@ fn snr_color(snr_db: f32) -> Color32 {
     }
 }
 
-/// 10491.527 → "10 491.527" (binlik ayıraçla okunaklı frekans).
+/// 10491.527 → "10 491.527" (frequency made readable with a thousands separator).
 fn group_mhz(mhz: f64) -> String {
     let text = format!("{mhz:.3}");
     let (int, frac) = text.split_once('.').unwrap_or((&text, ""));
@@ -1293,7 +1293,7 @@ fn group_mhz(mhz: f64) -> String {
     format!("{grouped}.{frac}")
 }
 
-/// Koyu, lacivert tonlu tema.
+/// Dark theme with navy tones.
 fn apply_theme(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         let mut v = egui::Visuals::dark();
@@ -1330,7 +1330,7 @@ fn apply_theme(ctx: &egui::Context) {
     });
 }
 
-/// 0..1 aralığındaki değeri koyu maviden sarıya/kırmızıya giden renge çevirir.
+/// Maps a value in 0..1 to a colour going from dark blue to yellow/red.
 fn colormap(t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     const STOPS: [(f32, [f32; 3]); 6] = [

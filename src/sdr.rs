@@ -1,7 +1,7 @@
-//! SDR cihazı ile konuşan arka plan iş parçacığı.
+//! Background thread talking to the SDR device.
 //!
-//! Arayüz komut gönderir (frekans, kazanç, örnekleme hızı); iş parçacığı
-//! örnekleri okur, spektrumu hesaplar ve olay olarak geri yollar.
+//! The UI sends commands (frequency, gain, sample rate); the thread reads
+//! samples, computes the spectrum and sends it back as events.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -18,26 +18,26 @@ use qoda::dsp::Spectrum;
 
 use crate::iio::IioRadio;
 
-/// Bir saniyede üretilecek yaklaşık spektrum karesi sayısı.
+/// Approximate number of spectrum frames produced per second.
 const FRAMES_PER_SECOND: f64 = 25.0;
 
-/// Alıcı türü; arka ucu ve sınırlarını belirler.
+/// Receiver kind; sets the back end and its limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
-    /// SoapySDR üzerinden genel alıcı (RTL-SDR ve diğerleri).
+    /// Generic receiver over SoapySDR (RTL-SDR and others).
     Soapy,
-    /// SoapySDR üzerinden HackRF: merkezinde belirgin bir DC tepesi vardır ve
-    /// otomatik kazancı yoktur.
+    /// HackRF over SoapySDR: it has a strong DC spike at its centre and no
+    /// automatic gain.
     HackRf,
-    /// libiio ile AD9361 tabanlı alıcılar (ADALM-Pluto, LibreSDR).
+    /// AD9361-based receivers over libiio (ADALM-Pluto, LibreSDR).
     Iio,
 }
 
 impl DeviceKind {
-    /// Arayüzde sunulan örnekleme hızları (MS/s). AD9361 2.08 MS/s altına
-    /// ek süzgeç olmadan inemez; RTL-SDR 2.4 MS/s üstünde örnek kaçırır.
-    /// 10–12 MS/s geniş bant transponderinin tamamını gösterir; gigabit Ethernet
-    /// gerektirir (100 Mbit bağlantıda 2.4 MS/s kullanılmalı).
+    /// Sample rates offered in the UI (MS/s). The AD9361 cannot go below 2.08 MS/s
+    /// without extra filtering; the RTL-SDR drops samples above 2.4 MS/s.
+    /// 10–12 MS/s shows the whole wideband transponder; it needs gigabit Ethernet
+    /// (use 2.4 MS/s on a 100 Mbit link).
     pub fn sample_rates(self) -> &'static [f64] {
         match self {
             DeviceKind::Soapy => &[1.024, 1.4, 2.048, 2.4],
@@ -46,8 +46,8 @@ impl DeviceKind {
         }
     }
 
-    /// Cihaz seçilince kullanılan örnekleme hızı (MS/s). HackRF'te yayının
-    /// DC tepesinden uzakta durabilmesi için pencere daha geniş tutulur.
+    /// Sample rate used when the device is selected (MS/s). On the HackRF the window is
+    /// kept wider so the signal can stay away from the DC spike.
     pub fn default_rate(self) -> f64 {
         match self {
             DeviceKind::HackRf => 8.0,
@@ -55,7 +55,7 @@ impl DeviceKind {
         }
     }
 
-    /// Ayarlanabilir kazanç aralığı (dB). HackRF'te LNA (0–40) + VGA (0–62).
+    /// Adjustable gain range (dB). On the HackRF, LNA (0–40) + VGA (0–62).
     pub fn gain_range(self) -> (f64, f64) {
         match self {
             DeviceKind::Soapy => (0.0, 50.0),
@@ -64,7 +64,7 @@ impl DeviceKind {
         }
     }
 
-    /// Cihaz türü değişince kullanılan kazanç (dB).
+    /// Gain used when the device kind changes (dB).
     pub fn default_gain(self) -> f64 {
         match self {
             DeviceKind::Soapy => 30.0,
@@ -77,8 +77,8 @@ impl DeviceKind {
         self != DeviceKind::HackRf
     }
 
-    /// Bir yayına ortalarken alıcının yayından ne kadar yana ayarlanacağı (MHz).
-    /// Merkezdeki DC tepesi belirgin olan alıcılarda yayın bandının dışına kaçılır.
+    /// How far beside a signal the receiver is tuned when centring on it (MHz).
+    /// On receivers with a strong DC spike at the centre, it moves outside the signal band.
     pub fn center_offset_mhz(self, occupied_mhz: f64) -> f64 {
         match self {
             DeviceKind::HackRf => occupied_mhz / 2.0 + 0.2,
@@ -87,25 +87,25 @@ impl DeviceKind {
     }
 }
 
-/// Seçilebilir bir alıcı.
+/// A selectable receiver.
 #[derive(Clone)]
 pub struct DeviceInfo {
     pub label: String,
-    /// SoapySDR için "anahtar=değer,..." argümanları, libiio için URI (ör. "ip:192.168.2.1").
+    /// "key=value,..." arguments for SoapySDR, a URI for libiio (e.g. "ip:192.168.2.1").
     pub args: String,
     pub kind: DeviceKind,
 }
 
 impl DeviceInfo {
-    /// Ağ üzerindeki bir Pluto/LibreSDR; `address` IP adresi ya da tam libiio URI'si.
+    /// A Pluto/LibreSDR on the network; `address` is an IP address or a full libiio URI.
     pub fn network(address: &str) -> Self {
         let uri = if address.contains(':') { address.to_string() } else { format!("ip:{address}") };
         Self { label: format!("Pluto/LibreSDR ({uri})"), args: uri, kind: DeviceKind::Iio }
     }
 }
 
-/// SoapySDR'ın arama klasörleri ve bulduğu modüller (tanılama için). Her modül
-/// için yükleyicinin sonucu: kaydettiği sürücüler ve varsa hata iletileri.
+/// SoapySDR's search folders and the modules it found (for diagnostics). For each
+/// module, the loader's result: the drivers it registered and any error messages.
 pub fn soapy_modules() -> (Vec<String>, Vec<(String, String)>) {
     use std::ffi::{CStr, CString};
     unsafe {
@@ -126,7 +126,7 @@ pub fn soapy_modules() -> (Vec<String>, Vec<(String, String)>) {
                 let mut result = soapysdr_sys::SoapySDR_getLoaderResult(c.as_ptr());
                 let errors: Vec<String> = (0..result.size)
                     .map(|i| {
-                        // Anahtar sürücü adı, değer hata iletisidir (boşsa sorunsuz).
+                        // Key is the driver name, value the error message (empty if fine).
                         let key = CStr::from_ptr(*result.keys.add(i)).to_string_lossy();
                         let val = CStr::from_ptr(*result.vals.add(i)).to_string_lossy();
                         if val.is_empty() { format!("{key} ok") } else { format!("{key}: {val}") }
@@ -140,7 +140,7 @@ pub fn soapy_modules() -> (Vec<String>, Vec<(String, String)>) {
     }
 }
 
-/// Ses kartları dışındaki SoapySDR cihazlarını listeler.
+/// Lists SoapySDR devices other than sound cards.
 pub fn list_devices() -> Vec<DeviceInfo> {
     let Ok(found) = soapysdr::enumerate("") else {
         return Vec::new();
@@ -160,7 +160,7 @@ pub fn list_devices() -> Vec<DeviceInfo> {
 pub struct Settings {
     pub if_hz: f64,
     pub sample_rate: f64,
-    /// dB cinsinden sabit kazanç; None ise otomatik kazanç.
+    /// Fixed gain in dB; None for automatic gain.
     pub gain: Option<f64>,
     pub fft_size: usize,
 }
@@ -169,12 +169,12 @@ pub enum Command {
     Tune(f64),
     Gain(Option<f64>),
     SampleRate(f64),
-    /// Ham IQ örneklerini SigMF olarak kaydetmeye başla. Yol uzantısızdır;
-    /// `.sigmf-data` ve `.sigmf-meta` dosyaları oluşturulur.
+    /// Start recording raw IQ samples as SigMF. The path has no extension;
+    /// `.sigmf-data` and `.sigmf-meta` files are created.
     StartRecording { path: PathBuf, rf_hz: f64 },
     StopRecording,
-    /// Okunan her IQ bloğunun kopyasını bu kanala gönder (canlı çözücü için); None durdurur.
-    /// Kanal doluyken atlanan bloklar sayaçta tutulur.
+    /// Send a copy of every IQ block read to this channel (for the live decoder); None stops it.
+    /// Blocks dropped while the channel is full are counted.
     IqTap(Option<(SyncSender<Vec<Complex<f32>>>, Arc<AtomicU64>)>),
 }
 
@@ -186,22 +186,22 @@ pub struct Frame {
 
 pub enum Event {
     Frame(Frame),
-    /// Kayıt sürüyor; şimdiye kadar yazılan örnek sayısı.
+    /// Recording in progress; the number of samples written so far.
     Recording { path: PathBuf, samples: u64 },
     RecordingStopped,
     Error(SdrError),
 }
 
-/// SDR iş parçacığının hataları; metne arayüz kendi dilinde çevirir.
+/// Errors of the SDR thread; the UI turns them into text in its own language.
 #[derive(Debug, Clone)]
 pub enum SdrError {
-    /// Cihaz, SoapySDR ya da libiio hatası (kütüphanenin kendi iletisiyle).
+    /// Device, SoapySDR or libiio error (with the library's own message).
     Device(String),
     RecordingOpen(String),
     RecordingWrite(String),
 }
 
-/// Açık bir SigMF kaydı.
+/// An open SigMF recording.
 struct Recording {
     path: PathBuf,
     data: BufWriter<File>,
@@ -246,13 +246,13 @@ impl Recording {
     }
 }
 
-/// Çalışan iş parçacığına bağlantı. Düşürüldüğünde iş parçacığı durur.
+/// Handle to the running thread. Dropping it stops the thread.
 pub struct Handle {
     pub commands: Sender<Command>,
     pub events: Receiver<Event>,
 }
 
-/// İş parçacığını başlatır. `notify` her yeni olayda çağrılır (ör. arayüzü yeniden çizdirmek için).
+/// Starts the thread. `notify` is called on every new event (e.g. to repaint the UI).
 pub fn spawn(device: DeviceInfo, settings: Settings, notify: impl Fn() + Send + 'static) -> Handle {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (ev_tx, ev_rx) = mpsc::channel();
@@ -265,7 +265,7 @@ pub fn spawn(device: DeviceInfo, settings: Settings, notify: impl Fn() + Send + 
     Handle { commands: cmd_tx, events: ev_rx }
 }
 
-/// İki arka ucu aynı biçimde kullanmak için alıcı.
+/// Receiver for using both back ends the same way.
 enum Radio {
     Soapy { device: soapysdr::Device, stream: soapysdr::RxStream<Complex<f32>>, hackrf: bool },
     Iio(IioRadio),
@@ -297,7 +297,7 @@ impl Radio {
         }
     }
 
-    /// Akış durdurulmadan değiştirilir: bazı rtlsdr.dll sürümleri deactivate sırasında çöküyor.
+    /// Changed without stopping the stream: some rtlsdr.dll versions crash during deactivate.
     fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
         match self {
             Radio::Soapy { device, .. } => device.set_sample_rate(Rx, 0, rate).map_err(|e| e.to_string()),
@@ -308,10 +308,10 @@ impl Radio {
     fn set_gain(&mut self, gain: Option<f64>) -> Result<(), String> {
         match self {
             Radio::Soapy { device, hackrf: true, .. } => {
-                // Tek kazanç değeri LNA'ya (8 dB adım) ve VGA'ya (2 dB adım) dağıtılır.
-                // RF yükseltici kapalı kalır: LNB çıkışını aşırı sürebilir.
+                // A single gain value is split between the LNA (8 dB steps) and the VGA (2 dB steps).
+                // The RF amplifier stays off: it could overdrive the LNB output.
                 let db = gain.unwrap_or(44.0).clamp(0.0, 102.0);
-                // LNA öne alınır (gürültü açısından daha iyi): 44 dB → LNA 24 + VGA 20.
+                // The LNA gets priority (better for noise): 44 dB → LNA 24 + VGA 20.
                 let lna = ((db * 0.6 / 8.0).floor() * 8.0).min(40.0);
                 let vga = (((db - lna) / 2.0).round() * 2.0).clamp(0.0, 62.0);
                 [("AMP", 0.0), ("LNA", lna), ("VGA", vga)]
@@ -330,7 +330,7 @@ impl Radio {
         }
     }
 
-    /// Okunan örnek sayısı; taşma gibi geçici durumlarda 0.
+    /// Number of samples read; 0 on transient conditions such as overflow.
     fn read(&mut self, out: &mut [Complex<f32>]) -> Result<usize, String> {
         match self {
             Radio::Soapy { stream, .. } => match stream.read(&mut [out], 1_000_000) {
@@ -367,7 +367,7 @@ fn run(
                 Ok(Command::Tune(hz)) => {
                     s.if_hz = hz;
                     radio.set_frequency(hz)?;
-                    // Kayıt meta verisi tek frekans içerir; frekans değişince kaydı kapat.
+                    // Recording metadata holds a single frequency; close the recording when the frequency changes.
                     stop_recording(&mut recording);
                 }
                 Ok(Command::Gain(g)) => {
@@ -403,7 +403,7 @@ fn run(
         }
 
         if let Some((t, dropped)) = &tap {
-            // Çözücü yetişemezse blok atlanır; SDR okuması hiç bekletilmez.
+            // If the decoder cannot keep up the block is dropped; SDR reading never waits.
             match t.try_send(samples.clone()) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -440,8 +440,8 @@ fn run(
 mod tests {
     use super::*;
 
-    /// Gerçek SoapySDR cihazından SigMF kaydı (geliştirme için):
-    /// `QODA_CAPTURE="driver=hackrf" QODA_CAPTURE_OUT=yol QODA_RATE=10e6 QODA_IF=745.25e6 QODA_RF=10495.25e6
+    /// SigMF recording from a real SoapySDR device (for development):
+    /// `QODA_CAPTURE="driver=hackrf" QODA_CAPTURE_OUT=path QODA_RATE=10e6 QODA_IF=745.25e6 QODA_RF=10495.25e6
     ///  QODA_GAINS="LNA=24,VGA=20,AMP=0" cargo test --bin qoda capture -- --ignored`
     #[test]
     #[ignore]
@@ -477,7 +477,7 @@ mod tests {
 
 #[cfg(test)]
 mod listing_tests {
-    /// Bağlı cihazların türlerini yazdırır: `cargo test --bin qoda listing -- --ignored --nocapture`
+    /// Prints the kinds of connected devices: `cargo test --bin qoda listing -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn print_device_kinds() {
@@ -491,16 +491,16 @@ mod listing_tests {
 mod radio_tests {
     use super::*;
 
-    /// Arayüzün kullandığı yolla (Radio + cihaz türü kazancı) kayıt:
-    /// `QODA_RADIO_OUT=yol cargo test --bin qoda radio_path -- --ignored`
+    /// Recording along the path the UI uses (Radio + device-kind gain):
+    /// `QODA_RADIO_OUT=path cargo test --bin qoda radio_path -- --ignored`
     #[test]
     #[ignore]
     fn radio_path_capture() {
         let Some(out) = std::env::var_os("QODA_RADIO_OUT") else { return };
-        let device = list_devices().into_iter().next().expect("cihaz yok");
+        let device = list_devices().into_iter().next().expect("no device");
         let kind = device.kind;
         let rate = kind.default_rate() * 1e6;
-        // Yayını merkezin yanına koy (arayüzün ortalama ofseti).
+        // Put the signal beside the centre (the UI's centring offset).
         let rf = 10_491.53e6 + kind.center_offset_mhz(1.8) * 1e6;
         let s = Settings { if_hz: rf - 9_750e6, sample_rate: rate, gain: Some(kind.default_gain()), fft_size: 2048 };
         let mut radio = Radio::open(&device, &s).unwrap();
@@ -510,7 +510,7 @@ mod radio_tests {
             filled += radio.read(&mut buf[filled..]).unwrap();
         }
         let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
-        println!("{kind:?} {} MS/s, kazanç {} dB, tepe {peak:.3}", rate / 1e6, kind.default_gain());
+        println!("{kind:?} {} MS/s, gain {} dB, peak {peak:.3}", rate / 1e6, kind.default_gain());
         let mut rec = Recording::start(std::path::PathBuf::from(out), rate, rf, s.if_hz).unwrap();
         rec.write(&buf).unwrap();
         rec.data.flush().unwrap();

@@ -1,4 +1,4 @@
-//! QODA - QO-100 DATV alıcı.
+//! QODA - QO-100 DATV receiver.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -12,23 +12,23 @@ mod settings;
 
 use eframe::egui;
 
-/// Pencere simgesinin piksel boyutu.
+/// Pixel size of the window icon.
 const ICON_SIZE: usize = 64;
 
-/// Paketlenmiş sürümde SoapySDR modülleri programın yanındaki
-/// `lib/SoapySDR/modules0.8` klasöründedir. SoapySDR modülleri kök klasöre göre
-/// aradığı için kök, programın klasörü yapılır; böylece kurulu bir PothosSDR'ın
-/// modülleriyle de çakışmaz. Klasör yoksa (geliştirme ortamı) dokunulmaz.
+/// In the packaged build the SoapySDR modules are in the `lib/SoapySDR/modules0.8`
+/// folder next to the program. SoapySDR searches for modules relative to its root,
+/// so the root is set to the program's folder; this also avoids clashing with the
+/// modules of an installed PothosSDR. Left alone if the folder is missing (development).
 fn use_bundled_soapy_modules() {
     let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return };
     if dir.join("lib").join("SoapySDR").join("modules0.8").is_dir() {
-        // Henüz başka iş parçacığı yokken ayarlanır.
+        // Set while there are no other threads yet.
         unsafe { std::env::set_var("SOAPY_SDR_ROOT", &dir) };
     }
 }
 
-/// `qoda --diagnose`: kurulumu denetler ve sonucu standart çıktıya yazar
-/// (ör. `qoda.exe --diagnose > tani.txt`).
+/// `qoda --diagnose`: checks the installation and writes the result to standard output
+/// (e.g. `qoda.exe --diagnose > diag.txt`).
 fn diagnose() {
     println!("QODA {}", env!("CARGO_PKG_VERSION"));
     println!("SOAPY_SDR_ROOT = {:?}", std::env::var_os("SOAPY_SDR_ROOT"));
