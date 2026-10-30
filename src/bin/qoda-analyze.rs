@@ -10,6 +10,7 @@ use qoda::detect;
 use qoda::dsp::Spectrum;
 use qoda::dvbs2::bbframe::{self, TsDepacketizer};
 use qoda::dvbs2::fec::FecParams;
+use qoda::dvbs2::modulation::Mapping;
 use qoda::dvbs2::{filters, plframe, plheader, timing};
 
 const SOF_THRESHOLD: f32 = 0.7;
@@ -235,11 +236,14 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
     ws.sort_by(f32::total_cmp);
     let common_w = ws[ws.len() / 2];
     for h in hits {
-        let qpsk = matches!(h.pls.modulation_and_rate(), Some((plheader::Modulation::Qpsk, _)));
+        let Some((modulation, rate)) = h.pls.modulation_and_rate() else { continue };
+        let qpsk = modulation == plheader::Modulation::Qpsk;
+        // 32APSK henüz desteklenmiyor.
+        let mapping = if qpsk { None } else { Mapping::new(modulation, rate) };
         let Some(len) = h.pls.frame_len() else { continue };
         let body_len = len - plheader::HEADER_LEN;
         let start = h.position + plheader::HEADER_LEN;
-        if !qpsk || start + body_len > symbols.len() {
+        if (!qpsk && mapping.is_none()) || start + body_len > symbols.len() {
             continue;
         }
         if scrambling.len() < body_len {
@@ -248,11 +252,15 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         let carrier = plframe::body_start(h.phase, common_w);
         let body = &symbols[start..start + body_len];
         // Gövdeyi dörde bölüp her parçadaki SNR'a bak: takip kaçarsa sonlara doğru düşer.
-        let out = plframe::demap_qpsk(body, &scrambling[..body_len], h.pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH);
-        let quarter = body_len / 4;
+        let out = match &mapping {
+            None => plframe::demap_qpsk(body, &scrambling[..body_len], h.pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH),
+            Some(map) => plframe::demap(body, &scrambling[..body_len], h.pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH, map),
+        };
+        // Pilotlar LLR'ye girmez; çeyrekler veri bitleri üzerinden alınır.
+        let quarter = out.llr.len() / 4;
         let parts: Vec<f32> = (0..4)
             .map(|i| {
-                let seg = &out.llr[2 * i * quarter..2 * (i + 1) * quarter];
+                let seg = &out.llr[i * quarter..(i + 1) * quarter];
                 let mean_abs = seg.iter().map(|l| l.abs()).sum::<f32>() / seg.len() as f32;
                 let var = seg.iter().map(|l| (l.abs() - mean_abs).powi(2)).sum::<f32>() / seg.len() as f32;
                 10.0 * (mean_abs * mean_abs / var.max(1e-12) / 2.0).log10()
@@ -262,11 +270,11 @@ fn demap_frames(symbols: &[Complex<f32>], hits: &[plheader::HeaderHit]) -> Vec<(
         llrs.push((h.pls, out.llr));
     }
     if snrs.is_empty() {
-        println!("No QPSK frames whose body can be decoded.");
+        println!("No frames whose body can be decoded.");
         return llrs;
     }
     println!();
-    println!("Frame body (descrambling + carrier tracking + QPSK demap):");
+    println!("Frame body (descrambling + carrier tracking + soft demap):");
     println!("{:>9} {:>8}   SNR dB per quarter", "position", "SNR dB");
     for (pos, snr, parts) in snrs.iter().take(8) {
         println!("{pos:>9} {snr:>8.1}   {:.1} {:.1} {:.1} {:.1}", parts[0], parts[1], parts[2], parts[3]);

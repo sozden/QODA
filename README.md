@@ -21,7 +21,7 @@ The name comes from **QO**-100 and **DA**TV.
 - Raw IQ recording in SigMF format, and a command-line tool to decode recordings
 - English and Turkish user interface
 
-Currently QPSK broadcasts are supported (with or without pilots, normal or short frames). 8PSK/APSK modulations and BCH error correction are next.
+QPSK, 8PSK and 16APSK broadcasts are supported, with or without pilots, in normal or short frames. 8PSK and 16APSK are verified with synthetic DVB-S2 signals; no such broadcast was on air while testing. 32APSK and BCH error correction are not implemented yet.
 
 ## Requirements
 
@@ -67,8 +67,8 @@ qoda-analyze recordings/<name>
 ## How it works
 
 ```
-SDR ─► frequency shift ─► decimation ─► RRC matched filter ─► Gardner timing ─► PL header sync (SOF + PLS)
-    ─► descrambling + carrier PLL ─► QPSK soft demap ─► LDPC (parallel) ─► BCH ─► BBFRAME ─► MPEG-TS
+SDR ─► DC blocker ─► frequency shift ─► decimation ─► RRC matched filter ─► Gardner timing ─► PL header sync (SOF + PLS)
+    ─► descrambling + carrier PLL ─► soft demap + bit deinterleaver ─► LDPC (parallel) ─► BCH ─► BBFRAME ─► MPEG-TS
     ─► ffmpeg (video) / ffplay (audio)
 ```
 

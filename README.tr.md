@@ -21,7 +21,7 @@ Adı **QO**-100 ve **DA**TV'den gelir.
 - SigMF biçiminde ham IQ kaydı ve kayıtları çözen komut satırı aracı
 - İngilizce ve Türkçe arayüz
 
-Şu an QPSK yayınlar destekleniyor (pilotlu/pilotsuz, normal/kısa çerçeve). 8PSK/APSK modülasyonları ve BCH hata düzeltme sırada.
+QPSK, 8PSK ve 16APSK yayınlar destekleniyor (pilotlu/pilotsuz, normal/kısa çerçeve). 8PSK ve 16APSK sentetik DVB-S2 sinyalleriyle doğrulandı; testler sırasında yayında böyle bir istasyon yoktu. 32APSK ve BCH hata düzeltme henüz yok.
 
 ## Gereksinimler
 
@@ -67,8 +67,8 @@ qoda-analyze recordings/<ad>
 ## Nasıl çalışır
 
 ```
-SDR ─► frekans kaydırma ─► seyreltme ─► RRC eşleştirilmiş filtre ─► Gardner zamanlama ─► PL başlık senkronu (SOF + PLS)
-    ─► karıştırma çözümü + taşıyıcı PLL ─► QPSK yumuşak demap ─► LDPC (paralel) ─► BCH ─► BBFRAME ─► MPEG-TS
+SDR ─► DC engelleme ─► frekans kaydırma ─► seyreltme ─► RRC eşleştirilmiş filtre ─► Gardner zamanlama ─► PL başlık senkronu (SOF + PLS)
+    ─► karıştırma çözümü + taşıyıcı PLL ─► yumuşak demap + bit karıştırıcı çözümü ─► LDPC (paralel) ─► BCH ─► BBFRAME ─► MPEG-TS
     ─► ffmpeg (video) / ffplay (ses)
 ```
 

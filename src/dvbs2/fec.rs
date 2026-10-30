@@ -157,3 +157,44 @@ mod tests {
         assert!(!bch.is_codeword(&word));
     }
 }
+
+#[cfg(test)]
+mod threshold_probe {
+    use super::*;
+    use crate::dvbs2::timing::tests::Lcg;
+
+    /// İdeal BPSK LLR'leriyle LDPC eşiği (geliştirme için):
+    /// `cargo test --lib ldpc_threshold -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ldpc_threshold() {
+        for (rate, ebn0s) in [((1, 2), [1.0, 1.5, 2.0]), ((3, 5), [2.0, 2.5, 3.0]), ((2, 3), [2.5, 3.0, 3.5])] {
+            let p = FecParams::new(rate, false).unwrap();
+            let code = p.ldpc();
+            let r = rate.0 as f64 / rate.1 as f64;
+            for ebn0 in ebn0s {
+                let mut rng = Lcg(7);
+                let mut uniform = || {
+                    let bits: u32 = (0..24).fold(0, |a, _| (a << 1) | rng.next_bit() as u32);
+                    (bits as f64 + 0.5) / (1u32 << 24) as f64
+                };
+                let sigma = (1.0 / (2.0 * r * 10f64.powf(ebn0 / 10.0))).sqrt();
+                let mut ok = 0;
+                for _ in 0..4 {
+                    let info: Vec<u8> = (0..code.k).map(|_| (uniform() < 0.5) as u8).collect();
+                    let word = code.encode(&info);
+                    let llr: Vec<f32> = word
+                        .iter()
+                        .map(|&b| {
+                            let g = (-2.0 * uniform().ln()).sqrt() * (std::f64::consts::TAU * uniform()).cos();
+                            let y = (1.0 - 2.0 * b as f64) + sigma * g;
+                            (2.0 * y / (sigma * sigma)) as f32
+                        })
+                        .collect();
+                    ok += code.decode(&llr, 50).converged as usize;
+                }
+                println!("oran {rate:?} Eb/N0 {ebn0} dB: {ok}/4");
+            }
+        }
+    }
+}

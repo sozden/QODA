@@ -7,6 +7,7 @@
 
 use num_complex::Complex;
 
+use super::modulation::Mapping;
 use super::plheader::HEADER_LEN;
 
 /// Gold dizisinin periyodu: 2^18 - 1.
@@ -56,12 +57,26 @@ pub struct Demapped {
     pub final_freq: f32,
 }
 
+/// Çerçeve başında döngü bu kadar sembol boyunca `ACQUIRE_FACTOR` kat geniş
+/// çalışır: başlıktan gelen faz ve frekans hatasını dar döngüden çok daha hızlı
+/// kapatır, sonra gürültüyü azaltmak için dar döngüye geçilir.
+const ACQUIRE_SYMBOLS: usize = 1000;
+const ACQUIRE_FACTOR: f32 = 2.0;
+
+/// İkinci derece döngünün (oransal, integral) kazançları.
+fn loop_gains(bn: f32) -> (f32, f32) {
+    let damping = 0.707f32;
+    let theta = bn / (damping + 1.0 / (4.0 * damping));
+    let d = 1.0 + 2.0 * damping * theta + theta * theta;
+    (4.0 * damping * theta / d, 4.0 * theta * theta / d)
+}
+
 /// Pilotlu çerçevelerde 16 yuvada (1440 veri sembolü) bir gelen pilot bloğunun uzunluğu.
 const PILOT_LEN: usize = 36;
 const PILOT_PERIOD: usize = 16 * 90;
 
 /// Gövdedeki `index`. sembol pilot mu. `pilot_blocks` çerçevedeki pilot bloğu sayısı.
-fn is_pilot(index: usize, pilot_blocks: usize) -> bool {
+pub(crate) fn is_pilot(index: usize, pilot_blocks: usize) -> bool {
     let segment = PILOT_PERIOD + PILOT_LEN;
     index / segment < pilot_blocks && index % segment >= PILOT_PERIOD
 }
@@ -78,10 +93,7 @@ pub fn demap_qpsk(
     bn: f32,
 ) -> Demapped {
     let s = std::f32::consts::FRAC_1_SQRT_2;
-    let damping = 0.707f32;
-    let theta = bn / (damping + 1.0 / (4.0 * damping));
-    let d = 1.0 + 2.0 * damping * theta + theta * theta;
-    let (kp, ki) = (4.0 * damping * theta / d, 4.0 * theta * theta / d);
+    let (acquire, track) = (loop_gains(bn * ACQUIRE_FACTOR), loop_gains(bn));
 
     let mut phase = start.phase;
     let mut freq = start.freq;
@@ -93,6 +105,7 @@ pub fn demap_qpsk(
         // Pilotlar bilinen (1 + j)/√2 sembolüdür; veride en yakın QPSK noktası.
         let decision = if pilot { Complex::new(s, s) } else { Complex::new(s.copysign(r.re), s.copysign(r.im)) };
         let e = (r * decision.conj()).im;
+        let (kp, ki) = if index < ACQUIRE_SYMBOLS { acquire } else { track };
         freq += ki * e;
         // Uzun gövdelerde f32 hassasiyeti kaybolmasın diye fazı sar.
         phase = (phase + freq + kp * e).rem_euclid(std::f32::consts::TAU);
@@ -108,6 +121,54 @@ pub fn demap_qpsk(
     // LLR ölçeği: 2·A·y/σ² ≈ y · 2√2 · SNR (birim genlikli QPSK, eksen başına).
     let scale = 2.0 * std::f32::consts::SQRT_2 * 10f32.powf(snr_db / 10.0);
     llr.iter_mut().for_each(|l| *l *= scale);
+    Demapped { llr, snr_db, final_freq: freq }
+}
+
+/// 8PSK/16APSK çerçeve gövdesini çözer. Faz takibi `demap_qpsk` ile aynıdır,
+/// kararlar en yakın takımyıldız noktasıdır. LLR'ler bit karıştırıcı geri
+/// alınmış olarak, kod sözcüğü sırasında döner.
+pub fn demap(
+    body: &[Complex<f32>],
+    scrambling: &[u8],
+    pilot_blocks: usize,
+    start: CarrierState,
+    bn: f32,
+    mapping: &Mapping,
+) -> Demapped {
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let (acquire, track) = (loop_gains(bn * ACQUIRE_FACTOR), loop_gains(bn));
+
+    let mut phase = start.phase;
+    let mut freq = start.freq;
+    let mut data = Vec::with_capacity(body.len());
+    let (mut sig, mut err) = (0.0f64, 0.0f64);
+    for (index, (z, &k)) in body.iter().zip(scrambling).enumerate() {
+        let r = descramble(*z, k) * Complex::from_polar(1.0, -phase);
+        let pilot = is_pilot(index, pilot_blocks);
+        let decision = if pilot { Complex::new(s, s) } else { mapping.decide(r) };
+        // İç halka noktalarında hata küçük çıkmasın diye genliğe göre ölçekle.
+        let e = (r * decision.conj()).im / decision.norm_sqr().max(0.05);
+        let (kp, ki) = if index < ACQUIRE_SYMBOLS { acquire } else { track };
+        freq += ki * e;
+        phase = (phase + freq + kp * e).rem_euclid(std::f32::consts::TAU);
+        if !pilot {
+            data.push(r);
+            sig += decision.norm_sqr() as f64;
+            err += (r - decision).norm_sqr() as f64;
+        }
+    }
+    let noise = (err / data.len().max(1) as f64).max(1e-6) as f32;
+    let snr_db = 10.0 * (sig / err.max(1e-12)).log10() as f32;
+    let bits = mapping.bits_per_symbol;
+    let n = data.len() * bits;
+    let mut llr = vec![0.0f32; n];
+    let mut sym = [0.0f32; 5];
+    for (i, z) in data.iter().enumerate() {
+        mapping.llrs(*z, noise, &mut sym);
+        for (b, &l) in sym[..bits].iter().enumerate() {
+            llr[mapping.codeword_position(n, i, b)] = l;
+        }
+    }
     Demapped { llr, snr_db, final_freq: freq }
 }
 
