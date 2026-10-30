@@ -123,7 +123,7 @@ impl QodaApp {
             .position(|d| d.args.contains("driver=rtlsdr"))
             .unwrap_or(0);
         let status = if devices.is_empty() { Status::NoDevice } else { Status::DevicesFound(devices.len()) };
-        Self {
+        let mut app = Self {
             lang: user.lang,
             devices,
             device_index,
@@ -154,7 +154,9 @@ impl QodaApp {
             pending_restart: None,
             signals: Vec::new(),
             frames_since_scan: 0,
-        }
+        };
+        app.fit_to_device();
+        app
     }
 
     fn t(&self) -> &'static Strings {
@@ -187,12 +189,21 @@ impl QodaApp {
     /// Seçili cihaz değişince örnekleme hızını ve kazancı onun sınırlarına uydurur.
     fn fit_to_device(&mut self) {
         let kind = self.device_kind();
-        let rates = kind.sample_rates();
-        if !rates.contains(&self.sample_rate_ms) {
-            self.sample_rate_ms = if rates.contains(&2.4) { 2.4 } else { rates[0] };
+        if !kind.sample_rates().contains(&self.sample_rate_ms) {
+            self.sample_rate_ms = kind.default_rate();
         }
         let (lo, hi) = kind.gain_range();
         self.gain_db = self.gain_db.clamp(lo, hi);
+        if !kind.supports_auto_gain() {
+            self.auto_gain = false;
+        }
+    }
+
+    /// Alıcıyı `mhz`deki yayını gösterecek şekilde ayarla; DC tepesi belirgin
+    /// alıcılarda yayın merkezin biraz yanında kalır.
+    fn center_on(&mut self, ctx: &egui::Context, mhz: f64) {
+        let offset = self.device_kind().center_offset_mhz(self.occupied_khz() as f64 / 1000.0);
+        self.retune(ctx, ((mhz + offset) * 1000.0).round() / 1000.0);
     }
 
     /// Geniş bant transponderinin tamamını göster: cihazın en yüksek hızına geç
@@ -279,7 +290,7 @@ impl QodaApp {
     fn selection_changed(&mut self, ctx: &egui::Context) {
         let (center, span) = self.frame_span();
         if (self.selected_mhz - center).abs() > span * 0.42 {
-            self.retune(ctx, self.selected_mhz);
+            self.center_on(ctx, self.selected_mhz);
         } else {
             self.schedule_restart();
         }
@@ -620,7 +631,10 @@ impl QodaApp {
             ui.end_row();
 
             ui.label(RichText::new(t.gain).color(MUTED));
-            let mut changed = ui.checkbox(&mut self.auto_gain, t.auto_gain).changed();
+            let kind = self.device_kind();
+            let mut changed = ui
+                .add_enabled(kind.supports_auto_gain(), egui::Checkbox::new(&mut self.auto_gain, t.auto_gain))
+                .changed();
             ui.end_row();
             ui.label("");
             let (gain_lo, gain_hi) = self.device_kind().gain_range();
@@ -699,7 +713,7 @@ impl QodaApp {
                 self.auto_detect(self.selected_mhz);
             }
             if ui.button(t.center).on_hover_text(t.center_tooltip).clicked() {
-                self.retune(ui.ctx(), self.selected_mhz);
+                self.center_on(ui.ctx(), self.selected_mhz);
             }
         });
         ui.add_space(2.0);
@@ -972,7 +986,7 @@ impl QodaApp {
             if response.double_clicked() {
                 self.selected_mhz = mhz_of(pos.x);
                 self.auto_detect(self.selected_mhz);
-                self.retune(ui.ctx(), self.selected_mhz);
+                self.center_on(ui.ctx(), self.selected_mhz);
             } else if response.clicked() {
                 self.selected_mhz = mhz_of(pos.x);
                 self.auto_detect(self.selected_mhz);

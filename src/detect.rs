@@ -18,6 +18,8 @@ const MIN_SNR_DB: f32 = 6.0;
 const SMOOTH_HZ: f64 = 10e3;
 /// Bundan geniş bölgeler yayın değil (ör. transponderin gürültü tümseği).
 const MAX_SYMBOL_RATE: f64 = 5e6;
+/// Bundan dar tepeler yayın değil (ör. alıcının merkezindeki DC tepesi).
+const MIN_SYMBOL_RATE: f64 = 20e3;
 /// Taban ararken spektrum bu genişlik (Hz) boyunca alçalmazsa vadiye ulaşılmış sayılır.
 const VALLEY_PATIENCE_HZ: f64 = 30e3;
 /// Taramada en fazla bu kadar yayın aranır.
@@ -130,7 +132,7 @@ fn detect_smoothed(s: &[f32], bin_hz: f64, guess: usize) -> Option<(Detection, (
         plateau = core[core.len() * 3 / 4];
     }
     let measured = (right - left) * bin_hz;
-    if measured > MAX_SYMBOL_RATE || right - left < 3.0 {
+    if !(MIN_SYMBOL_RATE..=MAX_SYMBOL_RATE).contains(&measured) || right - left < 3.0 {
         return None;
     }
 

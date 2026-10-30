@@ -1,6 +1,6 @@
 //! Akış hâlinde DVB-S2 alıcı: IQ örnekleri parça parça girer, MPEG-TS çıkar.
 //!
-//! Zincir: frekans kaydırma → (gerekirse seyreltme) → RRC eşleştirilmiş filtre → AGC → Gardner zamanlama →
+//! Zincir: DC engelleme → frekans kaydırma → (gerekirse seyreltme) → RRC eşleştirilmiş filtre → AGC → Gardner zamanlama →
 //! PL başlık senkronu → karıştırma çözümü + taşıyıcı takibi + demap → LDPC → BCH →
 //! BBFRAME → TS. Senkron bulunduktan sonra her başlık beklenen konumda doğrulanır.
 
@@ -22,9 +22,15 @@ use super::timing::TimingRecovery;
 use crate::tsinfo::{ServiceInfo, TsInfo};
 
 const TIMING_BANDWIDTH: f64 = 0.005;
+/// DC engelleyicinin ortalama izleme katsayısı (örnek başına). Yerel osilatör
+/// sızıntısını (HackRF, RTL-SDR merkez tepesi) yaklaşık 1/α örnekte öğrenir;
+/// çentiği yayının kendisini etkilemeyecek kadar dardır.
+const DC_ALPHA: f32 = 1e-5;
 /// Seyreltmeden sonra sembol başına en az bu kadar örnek kalır.
 const MIN_SAMPLES_PER_SYMBOL: f64 = 2.4;
-const CARRIER_BANDWIDTH: f32 = 0.005;
+/// Taşıyıcı takip döngüsünün bant genişliği (sembol hızına göre). Daha geniş
+/// döngü zayıf sinyalde ve HackRF gibi faz gürültüsü yüksek alıcılarda kayıyor.
+const CARRIER_BANDWIDTH: f32 = 0.002;
 const LDPC_MAX_ITERATIONS: usize = 50;
 /// LDPC çözümü için en fazla iş parçacığı.
 const MAX_LDPC_WORKERS: usize = 8;
@@ -126,6 +132,8 @@ fn spawn_ldpc_workers() -> (Sender<Job>, ChannelReceiver<Outcome>) {
 
 pub struct Receiver {
     cfg: ReceiverConfig,
+    /// Girişteki DC bileşeninin izlenen değeri.
+    dc: Complex<f32>,
     /// Frekans kaydırma osilatörü: her örnekte `osc_step` ile döner.
     osc: Complex<f32>,
     osc_step: Complex<f32>,
@@ -166,6 +174,7 @@ impl Receiver {
         let rrc = filters::StreamingFir::new(filters::rrc_taps(sps, cfg.rolloff, 8), 1);
         let (jobs, outcomes) = spawn_ldpc_workers();
         Self {
+            dc: Complex::default(),
             osc: Complex::new(1.0, 0.0),
             osc_step: Complex::from_polar(1.0, (-TAU * cfg.offset_hz / cfg.sample_rate) as f32),
             decimator,
@@ -226,12 +235,13 @@ impl Receiver {
         }
     }
 
-    /// Frekans kaydırma, seyreltme, RRC filtre ve AGC.
+    /// DC engelleme, frekans kaydırma, seyreltme, RRC filtre ve AGC.
     fn front_end(&mut self, iq: &[Complex<f32>]) -> Vec<Complex<f32>> {
         let mixed: Vec<Complex<f32>> = iq
             .iter()
             .map(|s| {
-                let v = s * self.osc;
+                self.dc += (s - self.dc) * DC_ALPHA;
+                let v = (s - self.dc) * self.osc;
                 self.osc *= self.osc_step;
                 v
             })

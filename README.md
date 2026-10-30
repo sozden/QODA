@@ -10,7 +10,7 @@ The name comes from **QO**-100 and **DA**TV.
 
 ## Features
 
-- Works with RTL-SDR and other receivers through SoapySDR, and with ADALM-Pluto / LibreSDR directly through libiio (tested with RTL-SDR and LibreSDR over Ethernet)
+- Works with RTL-SDR, HackRF and other receivers through SoapySDR, and with ADALM-Pluto / LibreSDR directly through libiio (tested with RTL-SDR, HackRF One and LibreSDR over Ethernet)
 - Enter the LNB local oscillator and the broadcast frequency; the intermediate frequency is computed and the receiver is tuned automatically
 - Live spectrum and waterfall, with a strip of the broadcasts found in the visible band; with a Pluto/LibreSDR on gigabit Ethernet the whole wideband transponder (10491–10499.5 MHz) fits on one screen at 12 MS/s
 - Easy tuning: scroll or click individual frequency digits, scroll to move the selection, drag the spectrum to move the receiver

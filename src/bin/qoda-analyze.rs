@@ -28,6 +28,8 @@ struct Args {
     freq: Option<f64>,
     /// Yalnızca kayıttaki yayınları listele.
     scan: bool,
+    /// Kaba spektrum profilini yazdır.
+    profile: bool,
     rolloff: Option<f64>,
     /// Kaydı akış alıcısından parça parça geçir (canlı çözümü sınamak için).
     stream: bool,
@@ -37,7 +39,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, rolloff: None, stream: false, noise_db: None };
+    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, profile: false, rolloff: None, stream: false, noise_db: None };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
@@ -49,6 +51,7 @@ fn parse_args() -> Result<Args, String> {
             "--rolloff" => args.rolloff = Some(num(it.next(), &a)?),
             "--stream" => args.stream = true,
             "--scan" => args.scan = true,
+            "--profile" => args.profile = true,
             "--noise" => args.noise_db = Some(num(it.next(), &a)?),
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}")),
             _ => args.path = PathBuf::from(a),
@@ -95,6 +98,9 @@ fn run() -> Result<(), String> {
     let mut spectrum = Spectrum::new(4096);
     let db = spectrum.compute(&x[..x.len().min(fs as usize)]);
     let n = db.len();
+    if args.profile {
+        print_profile(&db, fs, rec.frequency);
+    }
     if args.scan {
         print_scan(&db, fs, rec.frequency);
         return Ok(());
@@ -426,6 +432,18 @@ fn add_noise(x: &mut [Complex<f32>], db: f64) {
         let r = (-2.0 * u1.ln()).sqrt() * sigma;
         let th = std::f64::consts::TAU * u2;
         *z += Complex::new((r * th.cos()) as f32, (r * th.sin()) as f32);
+    }
+}
+
+/// Spektrumu 40 dilimde (ortalama dB) çubuk grafik olarak yazdırır.
+fn print_profile(db: &[f32], fs: f64, center_hz: f64) {
+    let slices = 40;
+    let per = db.len() / slices;
+    let levels: Vec<f32> = db.chunks(per).take(slices).map(|c| c.iter().sum::<f32>() / c.len() as f32).collect();
+    let low = levels.iter().cloned().fold(f32::INFINITY, f32::min);
+    for (i, l) in levels.iter().enumerate() {
+        let f = center_hz + ((i as f64 + 0.5) / slices as f64 - 0.5) * fs;
+        println!("{:>11.3} MHz {:>7.1} dB {}", f / 1e6, l, "#".repeat(((l - low) * 1.5) as usize));
     }
 }
 

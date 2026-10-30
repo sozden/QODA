@@ -21,11 +21,14 @@ use crate::iio::IioRadio;
 /// Bir saniyede üretilecek yaklaşık spektrum karesi sayısı.
 const FRAMES_PER_SECOND: f64 = 25.0;
 
-/// Alıcının hangi arka uçla sürüldüğü.
+/// Alıcı türü; arka ucu ve sınırlarını belirler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
-    /// SoapySDR (RTL-SDR, HackRF, ...).
+    /// SoapySDR üzerinden genel alıcı (RTL-SDR ve diğerleri).
     Soapy,
+    /// SoapySDR üzerinden HackRF: merkezinde belirgin bir DC tepesi vardır ve
+    /// otomatik kazancı yoktur.
+    HackRf,
     /// libiio ile AD9361 tabanlı alıcılar (ADALM-Pluto, LibreSDR).
     Iio,
 }
@@ -38,15 +41,39 @@ impl DeviceKind {
     pub fn sample_rates(self) -> &'static [f64] {
         match self {
             DeviceKind::Soapy => &[1.024, 1.4, 2.048, 2.4],
+            DeviceKind::HackRf => &[4.0, 8.0, 10.0, 12.0, 16.0, 20.0],
             DeviceKind::Iio => &[2.4, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0],
         }
     }
 
-    /// Ayarlanabilir kazanç aralığı (dB).
+    /// Cihaz seçilince kullanılan örnekleme hızı (MS/s). HackRF'te yayının
+    /// DC tepesinden uzakta durabilmesi için pencere daha geniş tutulur.
+    pub fn default_rate(self) -> f64 {
+        match self {
+            DeviceKind::HackRf => 8.0,
+            DeviceKind::Soapy | DeviceKind::Iio => 2.4,
+        }
+    }
+
+    /// Ayarlanabilir kazanç aralığı (dB). HackRF'te LNA (0–40) + VGA (0–62).
     pub fn gain_range(self) -> (f64, f64) {
         match self {
             DeviceKind::Soapy => (0.0, 50.0),
+            DeviceKind::HackRf => (0.0, 102.0),
             DeviceKind::Iio => (0.0, 71.0),
+        }
+    }
+
+    pub fn supports_auto_gain(self) -> bool {
+        self != DeviceKind::HackRf
+    }
+
+    /// Bir yayına ortalarken alıcının yayından ne kadar yana ayarlanacağı (MHz).
+    /// Merkezdeki DC tepesi belirgin olan alıcılarda yayın bandının dışına kaçılır.
+    pub fn center_offset_mhz(self, occupied_mhz: f64) -> f64 {
+        match self {
+            DeviceKind::HackRf => occupied_mhz / 2.0 + 0.2,
+            DeviceKind::Soapy | DeviceKind::Iio => 0.0,
         }
     }
 }
@@ -79,7 +106,8 @@ pub fn list_devices() -> Vec<DeviceInfo> {
         .map(|a| {
             let args = a.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
             let label = a.get("label").unwrap_or(&args).to_string();
-            DeviceInfo { label, args, kind: DeviceKind::Soapy }
+            let kind = if a.get("driver") == Some("hackrf") { DeviceKind::HackRf } else { DeviceKind::Soapy };
+            DeviceInfo { label, args, kind }
         })
         .collect()
 }
@@ -194,17 +222,17 @@ pub fn spawn(device: DeviceInfo, settings: Settings, notify: impl Fn() + Send + 
 
 /// İki arka ucu aynı biçimde kullanmak için alıcı.
 enum Radio {
-    Soapy { device: soapysdr::Device, stream: soapysdr::RxStream<Complex<f32>> },
+    Soapy { device: soapysdr::Device, stream: soapysdr::RxStream<Complex<f32>>, hackrf: bool },
     Iio(IioRadio),
 }
 
 impl Radio {
     fn open(info: &DeviceInfo, s: &Settings) -> Result<Self, String> {
         let mut radio = match info.kind {
-            DeviceKind::Soapy => {
+            DeviceKind::Soapy | DeviceKind::HackRf => {
                 let device = soapysdr::Device::new(info.args.as_str()).map_err(|e| e.to_string())?;
                 let stream = device.rx_stream::<Complex<f32>>(&[0]).map_err(|e| e.to_string())?;
-                Radio::Soapy { device, stream }
+                Radio::Soapy { device, stream, hackrf: info.kind == DeviceKind::HackRf }
             }
             DeviceKind::Iio => Radio::Iio(IioRadio::open(&info.args)?),
         };
@@ -234,6 +262,18 @@ impl Radio {
 
     fn set_gain(&mut self, gain: Option<f64>) -> Result<(), String> {
         match self {
+            Radio::Soapy { device, hackrf: true, .. } => {
+                // Tek kazanç değeri LNA'ya (8 dB adım) ve VGA'ya (2 dB adım) dağıtılır.
+                // RF yükseltici kapalı kalır: LNB çıkışını aşırı sürebilir.
+                let db = gain.unwrap_or(44.0).clamp(0.0, 102.0);
+                // LNA öne alınır (gürültü açısından daha iyi): 44 dB → LNA 24 + VGA 20.
+                let lna = ((db * 0.6 / 8.0).floor() * 8.0).min(40.0);
+                let vga = (((db - lna) / 2.0).round() * 2.0).clamp(0.0, 62.0);
+                [("AMP", 0.0), ("LNA", lna), ("VGA", vga)]
+                    .into_iter()
+                    .try_for_each(|(name, value)| device.set_gain_element(Rx, 0, name, value))
+                    .map_err(|e| e.to_string())
+            }
             Radio::Soapy { device, .. } => {
                 let result = match gain {
                     Some(db) => device.set_gain_mode(Rx, 0, false).and_then(|_| device.set_gain(Rx, 0, db)),
@@ -348,5 +388,44 @@ fn run(
             return Ok(());
         }
         notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gerçek SoapySDR cihazından SigMF kaydı (geliştirme için):
+    /// `QODA_CAPTURE="driver=hackrf" QODA_CAPTURE_OUT=yol QODA_RATE=10e6 QODA_IF=745.25e6 QODA_RF=10495.25e6
+    ///  QODA_GAINS="LNA=24,VGA=20,AMP=0" cargo test --bin qoda capture -- --ignored`
+    #[test]
+    #[ignore]
+    fn capture_from_soapy_device() {
+        let (Some(args), Some(out)) = (std::env::var_os("QODA_CAPTURE"), std::env::var_os("QODA_CAPTURE_OUT")) else {
+            return;
+        };
+        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (rate, if_hz, rf_hz) = (env("QODA_RATE", 10e6), env("QODA_IF", 745.25e6), env("QODA_RF", 10495.25e6));
+        let device = soapysdr::Device::new(args.to_str().unwrap()).unwrap();
+        device.set_sample_rate(Rx, 0, rate).unwrap();
+        device.set_frequency(Rx, 0, if_hz, ()).unwrap();
+        for item in std::env::var("QODA_GAINS").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
+            let (name, value) = item.split_once('=').unwrap();
+            device.set_gain_element(Rx, 0, name, value.parse().unwrap()).unwrap();
+        }
+        let mut stream = device.rx_stream::<Complex<f32>>(&[0]).unwrap();
+        stream.activate(None).unwrap();
+        let mut buf = vec![Complex::default(); (rate * 3.0) as usize];
+        let mut filled = 0;
+        while filled < buf.len() {
+            filled += stream.read(&mut [&mut buf[filled..]], 1_000_000).unwrap_or(0);
+        }
+        let rms = (buf.iter().map(|z| z.norm_sqr()).sum::<f32>() / buf.len() as f32).sqrt();
+        let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
+        println!("RMS {rms:.4}, tepe {peak:.4}");
+        let path = std::path::PathBuf::from(out);
+        let mut rec = Recording::start(path, rate, rf_hz, if_hz).unwrap();
+        rec.write(&buf).unwrap();
+        rec.data.flush().unwrap();
     }
 }
