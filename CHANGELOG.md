@@ -6,6 +6,8 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-31
+
 ### Changed
 - "Locked" now means frames are decoding. When frame headers are found but no frame decodes,
   QODA shows "Signal too weak" in red (watch card, video area and spectrum band) instead of a
@@ -98,7 +100,8 @@ First release.
 - Windows package with SoapySDR, the RTL-SDR and HackRF drivers and libiio, in two variants:
   with and without FFmpeg. `qoda --diagnose` reports what the program finds.
 
-[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/sozden/QODA/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/sozden/QODA/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/sozden/QODA/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/sozden/QODA/compare/v0.1.0...v0.1.1
