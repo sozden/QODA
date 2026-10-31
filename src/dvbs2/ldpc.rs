@@ -1,5 +1,5 @@
 //! DVB-S2 LDPC code: building the parity-check matrix from the standard's table,
-//! encoding and layered normalized min-sum decoding.
+//! encoding and layered belief propagation decoding.
 //!
 //! ETSI EN 302 307-1, clause 5.3.2: information bits are split into groups of 360.
 //! Row r of the table gives the parity checks the first bit of group r is connected
@@ -9,8 +9,53 @@
 
 /// Number of bits in a group in DVB-S2 codes.
 pub const GROUP: usize = 360;
-/// Scaling factor of min-sum messages.
-const NORMALIZATION: f32 = 0.8;
+/// The check node update uses φ(x) = -ln(tanh(x/2)) from a table with this many
+/// entries per unit, up to `PHI_MAX`. Exact belief propagation; normalized min-sum alone
+/// lost up to 2.5 dB on the low rates (QPSK 1/4, 1/3).
+const PHI_STEPS: f32 = 128.0;
+const PHI_MAX: f32 = 16.0;
+
+fn phi_table() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..(PHI_MAX * PHI_STEPS) as usize + 1)
+            .map(|i| {
+                // Value at the middle of the bin.
+                let x = (i as f32 + 0.5) / PHI_STEPS;
+                -(x * 0.5).tanh().ln()
+            })
+            .collect()
+    })
+}
+
+/// Below this φ is steep for a table: tanh(x/2) ≈ x/2 there, so φ(x) ≈ -ln(x/2).
+const PHI_SMALL: f32 = 1.0 / 16.0;
+/// Largest message magnitude; keeps -ln from producing infinity at x = 0.
+const MAX_LLR: f32 = 30.0;
+/// Input LLRs are clipped to this. Real signals have occasional symbols that are confidently
+/// wrong (phase noise, interference); belief propagation, unlike min-sum, trusts them fully and
+/// lost frames on a strong beacon recording. Weak signals give smaller LLRs, so this costs no sensitivity.
+const MAX_CHANNEL_LLR: f32 = 10.0;
+
+/// φ is its own inverse, so the same table serves both directions.
+#[inline]
+fn phi(table: &[f32], x: f32) -> f32 {
+    if x < PHI_SMALL {
+        (-(x * 0.5).ln()).min(MAX_LLR)
+    } else {
+        table[((x * PHI_STEPS) as usize).min(table.len() - 1)]
+    }
+}
+
+/// Scaling factor of min-sum messages (the fallback decoder).
+const MIN_SUM_NORMALIZATION: f32 = 0.8;
+
+#[derive(Clone, Copy)]
+enum CheckUpdate {
+    BeliefPropagation,
+    MinSum,
+}
+
 /// Early stop: look back this many iterations; if the number of unsatisfied checks
 /// has not dropped enough over that span, the frame is considered undecodable.
 const STALL_WINDOW: usize = 6;
@@ -100,18 +145,38 @@ impl LdpcCode {
     }
 
     /// `llr`: log-likelihood ratio for each bit (positive → 0).
+    ///
+    /// Belief propagation first; if it fails, normalized min-sum. On real signals an occasional
+    /// frame defeats belief propagation but not min-sum, which does not rely on the LLR scale.
+    /// The second attempt only costs time on frames that failed.
     pub fn decode(&self, llr: &[f32], max_iterations: usize) -> Decoded {
         assert_eq!(llr.len(), self.n);
-        let mut posterior = llr.to_vec();
+        let first = self.run(llr, max_iterations, CheckUpdate::BeliefPropagation);
+        if first.converged {
+            return first;
+        }
+        let second = self.run(llr, max_iterations, CheckUpdate::MinSum);
+        Decoded { iterations: first.iterations + second.iterations, ..second }
+    }
+
+    fn run(&self, llr: &[f32], max_iterations: usize, update: CheckUpdate) -> Decoded {
+        let mut posterior: Vec<f32> = match update {
+            CheckUpdate::BeliefPropagation => llr.iter().map(|l| l.clamp(-MAX_CHANNEL_LLR, MAX_CHANNEL_LLR)).collect(),
+            CheckUpdate::MinSum => llr.to_vec(),
+        };
         let mut messages = vec![0f32; self.edges.len()];
         let mut q = Vec::new();
         let mut bits = vec![0u8; self.n];
         let mut history = Vec::with_capacity(max_iterations);
+        let table = phi_table();
+        let mut phis = Vec::new();
 
         for iteration in 1..=max_iterations {
             for j in 0..self.n - self.k {
                 let range = self.check_start[j] as usize..self.check_start[j + 1] as usize;
                 q.clear();
+                phis.clear();
+                let mut total = 0.0f32;
                 let (mut min1, mut min2, mut min_at) = (f32::INFINITY, f32::INFINITY, 0);
                 let mut sign_negative = false;
                 for (i, e) in range.clone().enumerate() {
@@ -119,17 +184,27 @@ impl LdpcCode {
                     let value = posterior[v] - messages[e];
                     q.push(value);
                     let mag = value.abs();
-                    if mag < min1 {
-                        min2 = min1;
-                        min1 = mag;
-                        min_at = i;
-                    } else if mag < min2 {
-                        min2 = mag;
+                    match update {
+                        CheckUpdate::BeliefPropagation => {
+                            let p = phi(table, mag);
+                            phis.push(p);
+                            total += p;
+                        }
+                        CheckUpdate::MinSum => {
+                            if mag < min1 {
+                                (min2, min1, min_at) = (min1, mag, i);
+                            } else if mag < min2 {
+                                min2 = mag;
+                            }
+                        }
                     }
                     sign_negative ^= value < 0.0;
                 }
                 for (i, e) in range.enumerate() {
-                    let mag = NORMALIZATION * if i == min_at { min2 } else { min1 };
+                    let mag = match update {
+                        CheckUpdate::BeliefPropagation => phi(table, (total - phis[i]).max(0.0)),
+                        CheckUpdate::MinSum => MIN_SUM_NORMALIZATION * if i == min_at { min2 } else { min1 },
+                    };
                     let negative = sign_negative ^ (q[i] < 0.0);
                     let msg = if negative { -mag } else { mag };
                     messages[e] = msg;

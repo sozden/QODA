@@ -55,6 +55,10 @@ pub struct Demapped {
     pub snr_db: f32,
     /// Frequency estimate of the carrier loop at the end of the body (radians/symbol).
     pub final_freq: f32,
+    /// See [`pilot_correlation`]; zero without pilots.
+    pub pilot_corr: Complex<f32>,
+    /// Whether the phase came from the pilots (weak signal) rather than the loop; `final_freq` then means nothing.
+    pub pilot_aided: bool,
 }
 
 /// At the start of a frame the loop runs `ACQUIRE_FACTOR` times wider for this many
@@ -81,6 +85,82 @@ pub(crate) fn is_pilot(index: usize, pilot_blocks: usize) -> bool {
     index / segment < pilot_blocks && index % segment >= PILOT_PERIOD
 }
 
+/// Below this symbol SNR (dB) frames with pilots are demodulated with the phase measured on
+/// the pilot blocks instead of the decision-directed loop, whose wrong decisions make it slip.
+const PILOT_AIDED_SNR_DB: f32 = 6.0;
+/// The same for 8PSK, whose decisions go wrong at a higher SNR.
+const PILOT_AIDED_SNR_DB_8PSK: f32 = 9.0;
+
+/// Carrier phase for every body symbol from the known pilot blocks: the residual phase of each
+/// block (against `start`) is measured on its 36 symbols and interpolated linearly in between.
+/// The header, which `start` comes from, anchors the residual at zero before the body.
+/// `start.freq` must be within π/1476 rad/symbol, or the phase steps between blocks alias.
+fn pilot_phases(body: &[Complex<f32>], scrambling: &[u8], pilot_blocks: usize, start: &CarrierState) -> Vec<f32> {
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let pilot = Complex::new(s, s);
+    let segment = PILOT_PERIOD + PILOT_LEN;
+    // (centre index, unwrapped residual phase); the header centre is 45 symbols before the body.
+    let mut points = vec![(-(HEADER_LEN as f32) / 2.0, 0.0f32)];
+    for b in 0..pilot_blocks {
+        let first = b * segment + PILOT_PERIOD;
+        let acc: Complex<f32> = (first..first + PILOT_LEN)
+            .map(|i| descramble(body[i], scrambling[i]) * pilot.conj() * Complex::from_polar(1.0, -(start.phase + start.freq * i as f32)))
+            .sum();
+        let centre = first as f32 + PILOT_LEN as f32 / 2.0 - 0.5;
+        let prev = points.last().unwrap().1;
+        let step = (acc.arg() - prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        points.push((centre, prev + step));
+    }
+    let slope = |a: (f32, f32), b: (f32, f32)| (b.1 - a.1) / (b.0 - a.0);
+    let last_slope = if points.len() >= 2 { slope(points[points.len() - 2], points[points.len() - 1]) } else { 0.0 };
+    let mut seg = 0;
+    let phases = (0..body.len())
+        .map(|i| {
+            let x = i as f32;
+            while seg + 2 < points.len() && x > points[seg + 1].0 {
+                seg += 1;
+            }
+            let residual = if seg + 1 < points.len() && x <= points[seg + 1].0 {
+                points[seg].1 + slope(points[seg], points[seg + 1]) * (x - points[seg].0)
+            } else {
+                // After the last pilot block: continue with the last slope.
+                let p = *points.last().unwrap();
+                p.1 + last_slope * (x - p.0)
+            };
+            start.phase + start.freq * x + residual
+        })
+        .collect();
+    phases
+}
+
+/// Pilot-aided phases if the frame has pilots and the signal is weak.
+fn weak_signal_phases(body: &[Complex<f32>], scrambling: &[u8], pilot_blocks: usize, start: &CarrierState, below_db: f32) -> Option<Vec<f32>> {
+    let (s, n) = signal_and_noise(body)?;
+    (pilot_blocks > 0 && 10.0 * (s / n).log10() < below_db).then(|| pilot_phases(body, scrambling, pilot_blocks, start))
+}
+
+/// Symbol lag of the frequency measurement inside pilot blocks: ±π/24 rad/symbol unambiguous range.
+pub const PILOT_FREQ_LAG: usize = 24;
+
+/// Sum over all pilot blocks of `p[i + PILOT_FREQ_LAG]·conj(p[i])`, the pilots with their known
+/// value removed. Its argument is PILOT_FREQ_LAG times the frequency, independent of the phase.
+/// One frame's sum is too noisy at low SNR to place the phase between pilot blocks (that needs
+/// the frequency within π/1476 rad/symbol), so the receiver accumulates it over frames.
+fn pilot_correlation(body: &[Complex<f32>], scrambling: &[u8], pilot_blocks: usize) -> Complex<f32> {
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let pilot = Complex::new(s, -s); // conjugate of (1 + j)/√2
+    let segment = PILOT_PERIOD + PILOT_LEN;
+    let mut acc = Complex::default();
+    for b in 0..pilot_blocks {
+        let first = b * segment + PILOT_PERIOD;
+        let p = |i: usize| descramble(body[i], scrambling[i]) * pilot;
+        for i in first..first + PILOT_LEN - PILOT_FREQ_LAG {
+            acc += p(i + PILOT_FREQ_LAG) * p(i).conj();
+        }
+    }
+    acc
+}
+
 /// Demodulates a QPSK frame body: undoes the scrambling, tracks the phase with a
 /// decision-directed second-order PLL and produces LLRs for the data symbols.
 /// `body` is the symbols right after the header (including pilots, if any),
@@ -97,9 +177,13 @@ pub fn demap_qpsk(
 
     let mut phase = start.phase;
     let mut freq = start.freq;
+    let aided = weak_signal_phases(body, scrambling, pilot_blocks, &start, PILOT_AIDED_SNR_DB);
     let mut llr = Vec::with_capacity(body.len() * 2);
     let (mut sig, mut err) = (0.0f64, 0.0f64);
     for (index, (z, &k)) in body.iter().zip(scrambling).enumerate() {
+        if let Some(phases) = &aided {
+            phase = phases[index];
+        }
         let r = descramble(*z, k) * Complex::from_polar(1.0, -phase);
         let pilot = is_pilot(index, pilot_blocks);
         // Pilots are the known (1 + j)/√2 symbol; for data, the nearest QPSK point.
@@ -117,11 +201,39 @@ pub fn demap_qpsk(
         sig += (amp * amp) as f64;
         err += (r - decision * amp).norm_sqr() as f64;
     }
-    let snr_db = 10.0 * (sig / err.max(1e-12)).log10() as f32;
-    // LLR scale: 2·A·y/σ² ≈ y · 2√2 · SNR (unit-amplitude QPSK, per axis).
-    let scale = 2.0 * std::f32::consts::SQRT_2 * 10f32.powf(snr_db / 10.0);
+    let dd_snr_db = 10.0 * (sig / err.max(1e-12)).log10() as f32;
+    // LLR scale per axis: 2·A·y/σ² with A = √(S/2) and σ² = N/2, i.e. 2√2·SNR/√S. The moment
+    // estimate cannot see phase errors left by tracking (phase noise), the decision-directed one
+    // overestimates when decisions go wrong; the lower of the two keeps the LLRs from being
+    // overconfident, which belief propagation does not tolerate.
+    let dd_snr = 10f32.powf(dd_snr_db / 10.0);
+    let (snr, amplitude) = match signal_and_noise(body) {
+        Some((s, n)) => ((s / n).min(dd_snr), s.sqrt()),
+        None => (dd_snr, 1.0),
+    };
+    let snr_db = 10.0 * snr.log10();
+    let scale = 2.0 * std::f32::consts::SQRT_2 * snr / amplitude;
     llr.iter_mut().for_each(|l| *l *= scale);
-    Demapped { llr, snr_db, final_freq: freq }
+    let pilot_aided = aided.is_some();
+    Demapped { llr, snr_db, final_freq: freq, pilot_corr: pilot_correlation(body, scrambling, pilot_blocks), pilot_aided }
+}
+
+/// Signal and noise power of constant-modulus symbols (QPSK, 8PSK) from the second and fourth
+/// moments (M2M4). Unlike the decision-directed estimate it stays unbiased at low SNR, where
+/// wrong decisions hide noise; the LLR scale of belief propagation depends on it.
+fn signal_and_noise(symbols: &[Complex<f32>]) -> Option<(f32, f32)> {
+    let (mut m2, mut m4) = (0.0f64, 0.0f64);
+    for z in symbols {
+        let p = z.norm_sqr() as f64;
+        m2 += p;
+        m4 += p * p;
+    }
+    let len = symbols.len().max(1) as f64;
+    let (m2, m4) = (m2 / len, m4 / len);
+    let s = (2.0 * m2 * m2 - m4).max(0.0).sqrt();
+    let n = m2 - s;
+    // Above ~25 dB the estimate is dominated by rounding; the decision-directed one is fine there.
+    (s > 0.0 && n > s * 3e-3).then_some((s as f32, n as f32))
 }
 
 /// Demodulates an 8PSK/16APSK frame body. Phase tracking is the same as in
@@ -140,10 +252,19 @@ pub fn demap(
 
     let mut phase = start.phase;
     let mut freq = start.freq;
+    // The moment estimate and pilot-aided phase need constant modulus (8PSK); not for APSK.
+    let constant_modulus = mapping.points.iter().all(|p| (p.norm() - 1.0).abs() < 1e-3);
+    let moments = constant_modulus.then(|| signal_and_noise(body)).flatten();
+    let aided = if constant_modulus { weak_signal_phases(body, scrambling, pilot_blocks, &start, PILOT_AIDED_SNR_DB_8PSK) } else { None };
+    // Scale the symbols to the unit constellation: the AGC normalized signal plus noise, not the signal.
+    let gain = moments.map_or(1.0, |(s, _)| 1.0 / s.sqrt());
     let mut data = Vec::with_capacity(body.len());
     let (mut sig, mut err) = (0.0f64, 0.0f64);
     for (index, (z, &k)) in body.iter().zip(scrambling).enumerate() {
-        let r = descramble(*z, k) * Complex::from_polar(1.0, -phase);
+        if let Some(phases) = &aided {
+            phase = phases[index];
+        }
+        let r = descramble(*z, k) * Complex::from_polar(gain, -phase);
         let pilot = is_pilot(index, pilot_blocks);
         let decision = if pilot { Complex::new(s, s) } else { mapping.decide(r) };
         // Scale by amplitude so the error is not too small on inner ring points.
@@ -157,8 +278,10 @@ pub fn demap(
             err += (r - decision).norm_sqr() as f64;
         }
     }
-    let noise = (err / data.len().max(1) as f64).max(1e-6) as f32;
-    let snr_db = 10.0 * (sig / err.max(1e-12)).log10() as f32;
+    // As in `demap_qpsk`: the larger of the moment and decision-directed noise estimates.
+    let dd_noise = (err / data.len().max(1) as f64).max(1e-6) as f32;
+    let noise = moments.map_or(dd_noise, |(s, n)| (n / s).max(dd_noise));
+    let snr_db = moments.map_or(10.0 * (sig / err.max(1e-12)).log10() as f32, |_| -10.0 * noise.log10());
     let bits = mapping.bits_per_symbol;
     let n = data.len() * bits;
     let mut llr = vec![0.0f32; n];
@@ -169,7 +292,8 @@ pub fn demap(
             llr[mapping.codeword_position(n, i, b)] = l;
         }
     }
-    Demapped { llr, snr_db, final_freq: freq }
+    let pilot_aided = aided.is_some();
+    Demapped { llr, snr_db, final_freq: freq, pilot_corr: pilot_correlation(body, scrambling, pilot_blocks), pilot_aided }
 }
 
 /// Computes the phase at the first symbol of the body from the header's measured phase and frequency.

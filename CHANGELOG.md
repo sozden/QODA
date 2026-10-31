@@ -11,6 +11,18 @@ All notable changes to QODA are listed here. The format follows
   rules for USB receivers) and a `.tar.gz` for other distributions, built by `tools/linux/package.sh`
   and attached to tagged releases by CI. Also attached to the 0.1.1 release.
 
+### Changed
+- Better reception of weak signals, measured with a new sensitivity test against the thresholds
+  of EN 302 307-1:
+  - LDPC decoding uses belief propagation, with min-sum as a fallback. Min-sum alone lost up to
+    2.5 dB on the low code rates.
+  - Soft bits are scaled from an SNR estimate that stays correct on weak signals; the old one
+    made weak signals look stronger. 8PSK now reaches the standard's thresholds, and QPSK 3/5 and
+    above come within 0.5 dB of them.
+  - On weak signals with pilots, the carrier phase is taken from the pilot blocks instead of a
+    loop that slips when its decisions go wrong.
+  - Fewer frames are lost while the receiver locks on a weak signal.
+
 ### Fixed
 - Under WSL the program closed when the window was resized (WSLg's Wayland compositor drops the
   connection); QODA now uses X11 there.

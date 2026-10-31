@@ -41,12 +41,18 @@ const SEARCH_WINDOW: usize = 40_000;
 const VERIFY_SLACK: usize = 16;
 /// The lock is dropped if this many headers in a row cannot be verified.
 const MAX_MISSES: u32 = 3;
+/// Minimum SOF correlation and PLS confidence for a header found while unlocked.
+const ACQUIRE_SOF: f32 = 0.7;
+const ACQUIRE_PLS_MARGIN: f32 = 0.5;
 /// Minimum PLS confidence for accepting a header.
 const MIN_PLS_MARGIN: f32 = 0.3;
 /// Minimum SOF correlation for a header to count as in place while locked.
 const MIN_LOCKED_SOF: f32 = 0.8;
 /// Weight of the PLL frequency in the common estimate at the end of each frame.
 const FREQ_TRACKING: f32 = 0.5;
+/// Weight of the previous frames in the accumulated pilot frequency measurement (about
+/// 1 / (1 - x) frames are averaged).
+const PILOT_FREQ_MEMORY: f32 = 0.85;
 
 pub struct ReceiverConfig {
     pub sample_rate: f64,
@@ -149,6 +155,8 @@ pub struct Receiver {
     /// Common frequency offset (radians/symbol). Set from the header at first lock, then
     /// updated from the PLL frequency at the end of every frame.
     freq: Option<f32>,
+    /// Pilot frequency measurement accumulated over frames (see `plframe::Demapped::pilot_corr`).
+    pilot_corr: Complex<f32>,
     fec: Option<Arc<FecState>>,
     jobs: Sender<Job>,
     outcomes: ChannelReceiver<Outcome>,
@@ -185,6 +193,7 @@ impl Receiver {
             last_frame_len: 0,
             misses: 0,
             freq: None,
+            pilot_corr: Complex::default(),
             fec: None,
             jobs,
             outcomes,
@@ -280,13 +289,23 @@ impl Receiver {
                 }
                 let found = self
                     .search
-                    .find_all(&self.symbols, 0.7)
+                    .find_all(&self.symbols, ACQUIRE_SOF)
                     .into_iter()
-                    .find(|h| h.pls_margin >= 0.5 && h.pls.frame_len().is_some());
+                    .find(|h| h.pls_margin >= ACQUIRE_PLS_MARGIN && h.pls.frame_len().is_some());
                 match found {
                     Some(h) => {
-                        self.expected = Some(h.position);
+                        // Decode this header as found: searching for it again in a window at low
+                        // SNR may land on noise, which dropped the lock and lost frames.
+                        let len = h.pls.frame_len().unwrap();
+                        if self.symbols.len() < h.position + len {
+                            return;
+                        }
+                        self.decode_frame(&h);
                         self.misses = 0;
+                        self.last_frame_len = len;
+                        self.stats.locked = true;
+                        self.stats.pls = Some(h.pls);
+                        self.advance(h.position + len);
                     }
                     None => {
                         let cut = self.symbols.len() - HEADER_LEN;
@@ -425,8 +444,14 @@ impl Receiver {
         // The PLL's frequency at the end of the body is much better than a single header's estimate.
         // It is used without waiting for the LDPC result; otherwise, while the first estimate is wrong,
         // the following headers are decoded with the same error.
+        self.pilot_corr = self.pilot_corr * PILOT_FREQ_MEMORY + demapped.pilot_corr;
         if let Some(f) = &mut self.freq {
-            *f += FREQ_TRACKING * (demapped.final_freq - *f);
+            if demapped.pilot_aided {
+                // Weak signal: the loop did not run; the frequency comes from the pilots of the last frames.
+                *f = self.pilot_corr.arg() / plframe::PILOT_FREQ_LAG as f32;
+            } else {
+                *f += FREQ_TRACKING * (demapped.final_freq - *f);
+            }
         }
 
         let job = Job {
@@ -444,6 +469,9 @@ impl Receiver {
         let Outcome { fec, decoded, .. } = o;
         self.stats.ldpc_iterations = decoded.iterations;
         if !decoded.converged {
+            if std::env::var_os("QODA_DEBUG").is_some() {
+                eprintln!("LDPC failed: frame {} after {} iterations", self.emitted - 1, decoded.iterations);
+            }
             self.stats.frames_failed += 1;
             return;
         }
@@ -584,7 +612,8 @@ mod tests {
 
     /// Shapes the symbols with RRC, adds white noise at exactly `esn0_db` Es/N0 (measured from the
     /// shaped signal, so it does not depend on the pulse scaling) and decodes them.
-    fn decode_esn0(symbols: &[Complex<f32>], esn0_db: f64, seed: u64) -> ReceiverStats {
+    /// Returns the stats at the end and as they were after the first `warmup` symbols.
+    fn decode_esn0(symbols: &[Complex<f32>], esn0_db: f64, seed: u64, warmup: usize) -> (ReceiverStats, ReceiverStats) {
         let mut x = shape(symbols, SPS, ROLLOFF, 0.3);
         let power = x.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / x.len() as f64;
         // Es = power * SPS (energy per symbol); N0 = noise variance per sample.
@@ -600,11 +629,17 @@ mod tests {
         }
         let mut rx = Receiver::new(ReceiverConfig { sample_rate: SPS * 1e6, offset_hz: 0.0, symbol_rate: 1e6, rolloff: ROLLOFF });
         let mut ts = Vec::new();
-        for chunk in x.chunks(50_000) {
+        let mut early = None;
+        let warmup_samples = (warmup as f64 * SPS) as usize;
+        for (i, chunk) in x.chunks(50_000).enumerate() {
             rx.process(chunk, &mut ts);
+            if early.is_none() && (i + 1) * 50_000 >= warmup_samples {
+                rx.finish(&mut ts);
+                early = Some(rx.stats.clone());
+            }
         }
         rx.finish(&mut ts);
-        rx.stats.clone()
+        (rx.stats.clone(), early.unwrap_or_default())
     }
 
     /// Sensitivity sweep: frame success rate against Es/N0 for each MODCOD, next to the
@@ -622,23 +657,42 @@ mod tests {
             (17, "8PSK 9/10", 10.98),
         ];
         let only: Option<Vec<u8>> = std::env::var("QODA_SWEEP_CODES").ok().map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect());
-        let frames: usize = std::env::var("QODA_SWEEP_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
-        println!("{:<10} {:>6} {:>8}  offset from spec (dB): frames ok/LDPC failed", "MODCOD", "spec", "QODA");
+        let measured: usize = std::env::var("QODA_SWEEP_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        // Frames for acquisition and for the frequency estimates to settle; counted separately.
+        const WARMUP: usize = 8;
+        println!(
+            "{:<10} {:>6} {:>8}  offset from spec (dB): ok/LDPC failed of {measured} frames after {WARMUP} warm-up frames [ok during warm-up]",
+            "MODCOD", "spec", "QODA"
+        );
         for &(modcod, name, spec) in &SPEC {
             if only.as_ref().is_some_and(|o| !o.contains(&modcod)) {
                 continue;
             }
-            let symbols = synthetic_frames((modcod << 2) | 1, frames);
+            // QODA_SWEEP_NOPILOTS=1 for frames without pilots; QODA_SWEEP_W=0.01 adds a carrier
+            // offset (radians/symbol; 0.01 is 530 Hz at 333 kS/s).
+            let pilots = std::env::var_os("QODA_SWEEP_NOPILOTS").is_none();
+            let w: f32 = std::env::var("QODA_SWEEP_W").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            let code = (modcod << 2) | pilots as u8;
+            let frame_len = Pls::from_code(code).frame_len().unwrap();
+            // Two more frames at the end: the last frames of a recording are not decoded (the next
+            // header is needed to verify each one).
+            let mut symbols = synthetic_frames(code, WARMUP + measured + 2);
+            for (n, z) in symbols.iter_mut().enumerate() {
+                *z *= Complex::from_polar(1.0, (w as f64 * n as f64 % TAU) as f32);
+            }
             let mut row = String::new();
             let mut threshold = None;
             let mut offset = -1.0;
             while offset <= 4.0 {
-                let s = decode_esn0(&symbols, spec + offset, 7 + modcod as u64);
-                // The first frame is spent on acquisition, so count against frames - 1.
-                let ok = s.frames_ok.min(frames as u64 - 1);
+                // The boundary falls in the middle of the first measured frame, which is decoded after it.
+                let (s, early) = decode_esn0(&symbols, spec + offset, 7 + modcod as u64, WARMUP * frame_len + frame_len / 2);
+                let ok = (s.frames_ok - early.frames_ok).min(measured as u64);
                 // ok/failed: frames missing from both were lost before LDPC (sync).
-                row += &format!(" {offset:+.1}:{ok}/{}", s.frames_failed);
-                if ok == frames as u64 - 1 {
+                row += &format!(" {offset:+.1}:{ok}/{}[{}]", s.frames_failed - early.frames_failed, early.frames_ok);
+                if std::env::var_os("QODA_SWEEP_SNR").is_some() {
+                    row += &format!("({:.1})", s.snr_db - (spec + offset) as f32);
+                }
+                if ok >= measured as u64 {
                     threshold = Some(spec + offset);
                     break;
                 }
@@ -646,6 +700,48 @@ mod tests {
             }
             let t = threshold.map_or("  >+4".to_string(), |t| format!("{t:>6.2}"));
             println!("{name:<10} {spec:>6.2} {t:>8} {row}");
+        }
+    }
+
+    /// LDPC alone on ideal QPSK soft bits (no sync or carrier tracking): frames decoded out of
+    /// `QODA_SWEEP_FRAMES` per Es/N0 offset from the spec threshold.
+    /// `cargo test --release --lib ldpc_sweep -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn ldpc_sweep() {
+        let frames: usize = std::env::var("QODA_SWEEP_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        for (modcod, name, spec) in [(1u8, "QPSK 1/4", -2.35), (2, "QPSK 1/3", -1.24), (4, "QPSK 1/2", 1.00), (7, "QPSK 3/4", 4.03)] {
+            let (_, rate) = Pls::from_code(modcod << 2).modulation_and_rate().unwrap();
+            let ldpc = FecParams::new(rate, false).unwrap().ldpc();
+            let mut rng = Lcg(modcod as u64);
+            let mut row = String::new();
+            let t0 = std::time::Instant::now();
+            for step in -2..=6 {
+                let offset = step as f64 * 0.5;
+                let n0 = 10f64.powf(-(spec + offset) / 10.0);
+                let sigma = (n0 / 2.0).sqrt() as f32;
+                let a = std::f32::consts::FRAC_1_SQRT_2;
+                let mut ok = 0;
+                for _ in 0..frames {
+                    let info: Vec<u8> = (0..ldpc.k).map(|_| rng.next_bit()).collect();
+                    let word = ldpc.encode(&info);
+                    let llr: Vec<f32> = word
+                        .iter()
+                        .map(|&b| {
+                            let u1 = ((0..24).fold(0u32, |x, _| (x << 1) | rng.next_bit() as u32) as f32 + 0.5) / (1u32 << 24) as f32;
+                            let u2 = ((0..24).fold(0u32, |x, _| (x << 1) | rng.next_bit() as u32) as f32 + 0.5) / (1u32 << 24) as f32;
+                            let noise = (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos() * sigma;
+                            let y = if b == 0 { a } else { -a } + noise;
+                            2.0 * a * y / (sigma * sigma)
+                        })
+                        .collect();
+                    if ldpc.decode(&llr, LDPC_MAX_ITERATIONS).converged {
+                        ok += 1;
+                    }
+                }
+                row += &format!(" {offset:+.1}:{ok}");
+            }
+            println!("{name:<10} {spec:>6.2} {row}  ({:.1} ms/frame)", t0.elapsed().as_secs_f64() * 1e3 / (9 * frames) as f64);
         }
     }
 
