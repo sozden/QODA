@@ -13,7 +13,7 @@ use crate::sdr::{self, Command, DeviceInfo, DeviceKind, Event, Frame, SdrError, 
 use crate::settings::UserSettings;
 use qoda::detect::{self, Detection};
 use qoda::dvbs2::plheader::Pls;
-use qoda::dvbs2::receiver::ReceiverConfig;
+use qoda::dvbs2::receiver::{ReceiverConfig, ReceiverStats};
 use qoda::tsinfo::{ServiceInfo, StreamKind};
 use qoda::tuning;
 
@@ -228,21 +228,35 @@ impl QodaApp {
             return;
         }
         self.before_wideband = Some((self.sample_rate_ms, self.center_mhz));
-        self.set_sample_rate(ctx, rate);
+        // The retune restarts the decoder once, with the new rate and centre together.
+        self.send_sample_rate(rate);
         self.retune(ctx, WIDEBAND_CENTER_MHZ);
     }
 
-    /// Returns to the sample rate and centre used before the wideband view.
+    /// Returns to the sample rate and centre used before the wideband view. If the selected
+    /// broadcast (perhaps picked in the wideband view) would fall outside that narrower band,
+    /// centres on it instead, so watching goes on.
     fn leave_wideband(&mut self, ctx: &egui::Context) {
         let Some((rate, center)) = self.before_wideband.take() else { return };
-        self.set_sample_rate(ctx, rate);
-        self.retune(ctx, center);
+        self.send_sample_rate(rate);
+        let edge = rate / 2.0 - self.occupied_khz() as f64 / 2000.0;
+        if (self.selected_mhz - center).abs() > edge * 0.9 {
+            self.center_on(ctx, self.selected_mhz);
+        } else {
+            self.retune(ctx, center);
+        }
+    }
+
+    fn send_sample_rate(&mut self, rate: f64) {
+        if self.sample_rate_ms != rate {
+            self.sample_rate_ms = rate;
+            self.send(Command::SampleRate(rate * 1e6));
+        }
     }
 
     fn set_sample_rate(&mut self, ctx: &egui::Context, rate: f64) {
         if self.sample_rate_ms != rate {
-            self.sample_rate_ms = rate;
-            self.send(Command::SampleRate(rate * 1e6));
+            self.send_sample_rate(rate);
             if self.decoder.is_some() {
                 self.start_watch(ctx);
             }
@@ -802,10 +816,17 @@ impl QodaApp {
         let status = d.status.lock().unwrap().clone();
         let dropped = d.dropped.load(std::sync::atomic::Ordering::Relaxed);
         let s = &status.stats;
-        let (lock_text, lock_color) = if s.locked { (t.locked, GOOD) } else { (t.searching, WARN) };
+        let (lock_text, lock_color) = match lock_state(s) {
+            LockState::Decoding => (t.locked, GOOD),
+            LockState::TooWeak => (t.too_weak, BAD),
+            LockState::Searching => (t.searching, WARN),
+        };
         ui.horizontal(|ui| {
             dot(ui, lock_color);
-            ui.label(RichText::new(lock_text).strong().color(lock_color));
+            let label = ui.label(RichText::new(lock_text).strong().color(lock_color));
+            if lock_state(s) == LockState::TooWeak {
+                label.on_hover_text(t.too_weak_tooltip);
+            }
         });
         if let Some(name) = &s.service.name {
             ui.horizontal(|ui| {
@@ -923,17 +944,18 @@ impl QodaApp {
                 painter.image(tex.id(), video_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             }
             None => {
-                let locked = self
-                    .decoder
-                    .as_ref()
-                    .is_some_and(|d| d.status.lock().unwrap().stats.locked);
-                let text = if locked { t.video_waiting } else { t.video_searching };
-                painter.text(video_rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(18.0), MUTED);
+                let state = self.decoder.as_ref().map(|d| lock_state(&d.status.lock().unwrap().stats));
+                let (text, color) = match state {
+                    Some(LockState::Decoding) => (t.video_waiting, MUTED),
+                    Some(LockState::TooWeak) => (t.too_weak, BAD),
+                    _ => (t.video_searching, MUTED),
+                };
+                painter.text(video_rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(18.0), color);
             }
         }
         if let Some(d) = &self.decoder {
             let s = d.status.lock().unwrap().stats.clone();
-            if s.locked {
+            if lock_state(&s) == LockState::Decoding {
                 let mut label = t.live.to_string();
                 if let Some(name) = &s.service.name {
                     label += &format!("   {name}");
@@ -1008,9 +1030,16 @@ impl QodaApp {
             f += step;
         }
 
-        // Band occupied by the selected signal; green with a label once the decoder is locked on it.
-        let locked = self.locked_on_selection();
-        let color = if locked { GOOD } else { BAND };
+        // Band occupied by the selected signal; with a label once the decoder has found its frames:
+        // green while they decode, red while they are too weak to decode.
+        let state = self.lock_on_selection();
+        let tag = match state {
+            LockState::Decoding => Some((self.t().locked, GOOD)),
+            LockState::TooWeak => Some((self.t().too_weak, BAD)),
+            LockState::Searching => None,
+        };
+        let locked = tag.is_some();
+        let color = tag.map_or(BAND, |(_, c)| c);
         let half = self.occupied_khz() as f64 / 2000.0;
         let band = Rect::from_x_y_ranges(x_of(self.selected_mhz - half)..=x_of(self.selected_mhz + half), spec_rect.y_range());
         painter.rect_filled(band, CornerRadius::ZERO, color.gamma_multiply(if locked { 0.18 } else { 0.10 }));
@@ -1020,10 +1049,10 @@ impl QodaApp {
         }
         let sx = x_of(self.selected_mhz);
         painter.line_segment([pos2(sx, spec_rect.top()), pos2(sx, wf_rect.bottom())], Stroke::new(1.0, color.gamma_multiply(0.8)));
-        if locked {
-            let galley = painter.layout_no_wrap(self.t().locked.to_uppercase(), FontId::proportional(11.0), DEEP);
+        if let Some((text, tag_color)) = tag {
+            let galley = painter.layout_no_wrap(text.to_uppercase(), FontId::proportional(11.0), DEEP);
             let tag = Rect::from_center_size(pos2(sx, spec_rect.top() + 12.0), galley.size() + vec2(12.0, 4.0));
-            painter.rect_filled(tag, CornerRadius::same(4), GOOD);
+            painter.rect_filled(tag, CornerRadius::same(4), tag_color);
             painter.galley(tag.min + vec2(6.0, 2.0), galley, DEEP);
         }
 
@@ -1138,9 +1167,12 @@ impl QodaApp {
         self.spectrum(ui, spec);
     }
 
-    /// Whether the decoder is locked on the selected signal (not on settings about to change).
-    fn locked_on_selection(&self) -> bool {
-        self.pending_restart.is_none() && self.decoder.as_ref().is_some_and(|d| d.status.lock().unwrap().stats.locked)
+    /// The decoder's state on the selected signal (searching while settings are about to change).
+    fn lock_on_selection(&self) -> LockState {
+        match (&self.decoder, self.pending_restart) {
+            (Some(d), None) => lock_state(&d.status.lock().unwrap().stats),
+            _ => LockState::Searching,
+        }
     }
 
     /// Service name and provider of the decoded signal (while watching, once read).
@@ -1204,6 +1236,23 @@ impl eframe::App for QodaApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(10)))
             .show(ui, |ui| self.central(ui));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LockState {
+    /// No frame sync.
+    Searching,
+    /// Frames are found but none decode.
+    TooWeak,
+    Decoding,
+}
+
+fn lock_state(s: &ReceiverStats) -> LockState {
+    match (s.locked, s.decoding) {
+        (true, true) => LockState::Decoding,
+        (true, false) => LockState::TooWeak,
+        (false, _) => LockState::Searching,
     }
 }
 

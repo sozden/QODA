@@ -521,8 +521,11 @@ mod radio_tests {
         let kind = device.kind;
         let rate = std::env::var("QODA_RADIO_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(kind.default_rate()) * 1e6;
         let gain = std::env::var("QODA_RADIO_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(kind.default_gain());
-        // Put the signal beside the centre (the UI's centring offset).
-        let rf = 10_491.53e6 + kind.center_offset_mhz(1.8) * 1e6;
+        // Put the signal beside the centre (the UI's centring offset); QODA_RADIO_RF=10495.25 (MHz) sets the centre.
+        let rf = match std::env::var("QODA_RADIO_RF").ok().and_then(|v| v.parse::<f64>().ok()) {
+            Some(mhz) => mhz * 1e6,
+            None => 10_491.53e6 + kind.center_offset_mhz(1.8) * 1e6,
+        };
         let s = Settings { if_hz: rf - 9_750e6, sample_rate: rate, gain: Some(gain), fft_size: 2048 };
         let mut radio = Radio::open(&device, &s).unwrap();
         let mut buf = vec![Complex::default(); (rate * 3.0) as usize];

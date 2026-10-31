@@ -145,7 +145,20 @@ fn detect_smoothed(s: &[f32], bin_hz: f64, guess: usize) -> Option<(Detection, (
     if snr < MIN_SNR_DB {
         return None;
     }
-    let (fl, fr) = edges(s, guess, floor + 3.0);
+    // Measure the width where the signal alone is at half its power. Plateau − 3 dB is that
+    // point only if the noise is negligible; on a signal a few dB above the floor it lands near
+    // the floor and takes in the skirts too, so subtract the noise power first.
+    // The noise under the signal is taken as the mean of the two sides: on a transponder edge or
+    // next to the receiver's filter slope the two differ, and the higher one makes the width too narrow.
+    let lin = |db: f32| 10f64.powf(db as f64 / 10.0);
+    let noise = (lin(floor_left) + lin(floor_right)) / 2.0;
+    let half = (10.0 * ((lin(plateau) + noise) / 2.0).log10()) as f32;
+    (left, right) = edges(s, guess, half);
+    let measured = (right - left) * bin_hz;
+    if !(MIN_SYMBOL_RATE..=MAX_SYMBOL_RATE).contains(&measured) || right - left < 3.0 {
+        return None;
+    }
+    let (fl, fr) = edges(s, guess, floor + 3.0_f32.min(snr / 2.0));
     let rolloff = (((fr - fl) / (right - left)) as f32 - 1.0).clamp(0.0, 0.5);
     let common = COMMON_SYMBOL_RATES
         .iter()
@@ -280,6 +293,16 @@ mod tests {
         let db = rc_spectrum(n, fs, -50e3, 1.5e6, 0.2, 4.0);
         let d = detect(&db, fs, n / 2).expect("weak signal should be found");
         assert_eq!(d.common_symbol_rate, Some(1.5e6), "{d:?}");
+    }
+
+    /// 3 dB above the floor, plateau − 3 dB is at the floor: the width must still be Rs, not (1 + α)·Rs.
+    #[test]
+    fn measures_symbol_rate_of_signal_near_floor() {
+        let (n, fs) = (4096, 4e6);
+        let db = rc_spectrum(n, fs, 300e3, 500e3, 0.2, 3.0);
+        let d = detect(&db, fs, n / 2 + 307).expect("signal should be found");
+        assert!((d.measured_symbol_rate - 500e3).abs() < 15e3, "{d:?}");
+        assert_eq!(d.common_symbol_rate, Some(500e3), "{d:?}");
     }
 
     #[test]

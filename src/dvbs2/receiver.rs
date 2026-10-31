@@ -41,6 +41,8 @@ const SEARCH_WINDOW: usize = 40_000;
 const VERIFY_SLACK: usize = 16;
 /// The lock is dropped if this many headers in a row cannot be verified.
 const MAX_MISSES: u32 = 3;
+/// Number of most recent frames `ReceiverStats::decoding` looks at.
+const RECENT_FRAMES: u32 = 4;
 /// Minimum SOF correlation and PLS confidence for a header found while unlocked.
 const ACQUIRE_SOF: f32 = 0.7;
 const ACQUIRE_PLS_MARGIN: f32 = 0.5;
@@ -64,7 +66,11 @@ pub struct ReceiverConfig {
 
 #[derive(Default, Clone)]
 pub struct ReceiverStats {
+    /// Frame headers are found where expected (frame sync).
     pub locked: bool,
+    /// At least one of the last `RECENT_FRAMES` frames decoded. Locked but not decoding means
+    /// the signal is too weak for its MODCOD.
+    pub decoding: bool,
     pub pls: Option<Pls>,
     pub frames_ok: u64,
     /// Frames on which LDPC did not converge.
@@ -157,6 +163,8 @@ pub struct Receiver {
     freq: Option<f32>,
     /// Pilot frequency measurement accumulated over frames (see `plframe::Demapped::pilot_corr`).
     pilot_corr: Complex<f32>,
+    /// LDPC results of the last frames as bits (1 = decoded), newest lowest.
+    recent: u32,
     fec: Option<Arc<FecState>>,
     jobs: Sender<Job>,
     outcomes: ChannelReceiver<Outcome>,
@@ -194,6 +202,7 @@ impl Receiver {
             misses: 0,
             freq: None,
             pilot_corr: Complex::default(),
+            recent: 0,
             fec: None,
             jobs,
             outcomes,
@@ -351,6 +360,8 @@ impl Receiver {
                 if self.misses >= MAX_MISSES || self.last_frame_len == 0 {
                     self.expected = None;
                     self.stats.locked = false;
+                    self.stats.decoding = false;
+                    self.recent = 0;
                 } else {
                     // The header could not be read this time; assume the frame length has not changed.
                     self.advance(expected + self.last_frame_len);
@@ -468,6 +479,8 @@ impl Receiver {
     fn finish_frame(&mut self, o: Outcome, ts: &mut Vec<u8>) {
         let Outcome { fec, decoded, .. } = o;
         self.stats.ldpc_iterations = decoded.iterations;
+        self.recent = ((self.recent << 1) | decoded.converged as u32) & ((1 << RECENT_FRAMES) - 1);
+        self.stats.decoding = self.recent != 0;
         if !decoded.converged {
             if std::env::var_os("QODA_DEBUG").is_some() {
                 eprintln!("LDPC failed: frame {} after {} iterations", self.emitted - 1, decoded.iterations);

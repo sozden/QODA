@@ -6,6 +6,18 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- "Locked" now means frames are decoding. When frame headers are found but no frame decodes,
+  QODA shows "Signal too weak" in red (watch card, video area and spectrum band) instead of a
+  green "Locked" next to an empty picture.
+
+### Fixed
+- The symbol rate of a signal only a few dB above the noise floor was measured too high (e.g.
+  662 instead of 500 kS/s): the half-power width is now taken with the noise power subtracted.
+- Returning from the wideband view lost the broadcast if it had been picked in the wideband view
+  and fell outside the previous band; QODA now centres on it. The switch also restarts the decoder
+  once instead of twice.
+
 ## [0.1.3] - 2026-10-31
 
 ### Fixed
