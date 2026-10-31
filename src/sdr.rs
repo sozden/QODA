@@ -507,16 +507,23 @@ mod radio_tests {
 
     /// Recording along the path the UI uses (Radio + device-kind gain):
     /// `QODA_RADIO_OUT=path cargo test --bin qoda radio_path -- --ignored`
+    /// QODA_RADIO_DEVICE=ip:192.168.1.47 picks a network receiver instead of the first device;
+    /// QODA_RADIO_GAIN=20 sets the gain (dB), e.g. to weaken the signal for sensitivity tests;
+    /// QODA_RADIO_RATE=4 the sample rate (MS/s).
     #[test]
     #[ignore]
     fn radio_path_capture() {
         let Some(out) = std::env::var_os("QODA_RADIO_OUT") else { return };
-        let device = list_devices().into_iter().next().expect("no device");
+        let device = match std::env::var("QODA_RADIO_DEVICE") {
+            Ok(uri) => DeviceInfo::network(&uri),
+            Err(_) => list_devices().into_iter().next().expect("no device"),
+        };
         let kind = device.kind;
-        let rate = kind.default_rate() * 1e6;
+        let rate = std::env::var("QODA_RADIO_RATE").ok().and_then(|v| v.parse().ok()).unwrap_or(kind.default_rate()) * 1e6;
+        let gain = std::env::var("QODA_RADIO_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(kind.default_gain());
         // Put the signal beside the centre (the UI's centring offset).
         let rf = 10_491.53e6 + kind.center_offset_mhz(1.8) * 1e6;
-        let s = Settings { if_hz: rf - 9_750e6, sample_rate: rate, gain: Some(kind.default_gain()), fft_size: 2048 };
+        let s = Settings { if_hz: rf - 9_750e6, sample_rate: rate, gain: Some(gain), fft_size: 2048 };
         let mut radio = Radio::open(&device, &s).unwrap();
         let mut buf = vec![Complex::default(); (rate * 3.0) as usize];
         let mut filled = 0;
@@ -524,7 +531,7 @@ mod radio_tests {
             filled += radio.read(&mut buf[filled..]).unwrap();
         }
         let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
-        println!("{kind:?} {} MS/s, gain {} dB, peak {peak:.3}", rate / 1e6, kind.default_gain());
+        println!("{kind:?} {} MS/s, gain {gain} dB, peak {peak:.3}", rate / 1e6);
         let mut rec = Recording::start(std::path::PathBuf::from(out), rate, rf, s.if_hz).unwrap();
         rec.write(&buf).unwrap();
         rec.data.flush().unwrap();
