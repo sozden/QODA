@@ -11,6 +11,12 @@ All notable changes to QODA are listed here. The format follows
   rules for USB receivers) and a `.tar.gz` for other distributions, built by `tools/linux/package.sh`
   and attached to tagged releases by CI. Also attached to the 0.1.1 release.
 
+- Full screen video: a button on the picture or a double click; Esc leaves.
+- The wideband view button returns to the previous sample rate and frequency when pressed again.
+- The selected signal's band on the spectrum turns green and reads "LOCKED" while the decoder is
+  locked on it.
+- The uplink (TX) frequency for the selected signal, downlink − 8089.5 MHz, for information.
+
 ### Changed
 - Better reception of weak signals, measured with a new sensitivity test against the thresholds
   of EN 302 307-1:

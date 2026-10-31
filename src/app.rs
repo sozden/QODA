@@ -36,6 +36,8 @@ const SCAN_EVERY_FRAMES: u32 = 12;
 const WIDEBAND_CENTER_MHZ: f64 = 10495.25;
 /// Lowest sample rate needed for the wideband view (MS/s).
 const WIDEBAND_MIN_RATE: f64 = 10.0;
+/// QO-100 wideband transponder: downlink = uplink + this (MHz); 2401.5 MHz → 10491 MHz.
+const UPLINK_OFFSET_MHZ: f64 = 8089.5;
 
 /// Colour palette.
 mod palette {
@@ -111,6 +113,10 @@ pub struct QodaApp {
     /// Signals found in the visible band: (RF MHz, symbol rate kS/s, roll-off).
     signals: Vec<(f64, f32, f32)>,
     frames_since_scan: u32,
+    /// Sample rate (MS/s) and centre (MHz) before the wideband view, to return to.
+    before_wideband: Option<(f64, f64)>,
+    /// The video fills the whole screen.
+    fullscreen: bool,
 }
 
 impl QodaApp {
@@ -157,6 +163,8 @@ impl QodaApp {
             pending_restart: None,
             signals: Vec::new(),
             frames_since_scan: 0,
+            before_wideband: None,
+            fullscreen: false,
         };
         app.fit_to_device();
         app
@@ -219,11 +227,26 @@ impl QodaApp {
         if rate < WIDEBAND_MIN_RATE {
             return;
         }
+        self.before_wideband = Some((self.sample_rate_ms, self.center_mhz));
+        self.set_sample_rate(ctx, rate);
+        self.retune(ctx, WIDEBAND_CENTER_MHZ);
+    }
+
+    /// Returns to the sample rate and centre used before the wideband view.
+    fn leave_wideband(&mut self, ctx: &egui::Context) {
+        let Some((rate, center)) = self.before_wideband.take() else { return };
+        self.set_sample_rate(ctx, rate);
+        self.retune(ctx, center);
+    }
+
+    fn set_sample_rate(&mut self, ctx: &egui::Context, rate: f64) {
         if self.sample_rate_ms != rate {
             self.sample_rate_ms = rate;
             self.send(Command::SampleRate(rate * 1e6));
+            if self.decoder.is_some() {
+                self.start_watch(ctx);
+            }
         }
-        self.retune(ctx, WIDEBAND_CENTER_MHZ);
     }
 
     fn add_network_device(&mut self) {
@@ -638,10 +661,10 @@ impl QodaApp {
                     }
                 });
             if self.sample_rate_ms != before {
-                self.send(Command::SampleRate(self.sample_rate_ms * 1e6));
-                if self.decoder.is_some() {
-                    self.start_watch(ui.ctx());
-                }
+                let rate = std::mem::replace(&mut self.sample_rate_ms, before);
+                self.set_sample_rate(ui.ctx(), rate);
+                // A rate picked by hand ends the wideband view.
+                self.before_wideband = None;
             }
             ui.end_row();
 
@@ -680,15 +703,27 @@ impl QodaApp {
             ui.label(RichText::new(format!("{:.3} MHz", self.if_hz() / 1e6)).monospace().color(ACCENT));
             ui.end_row();
         });
+        // The same button enters the wideband view and returns from it.
+        let wide = self.before_wideband.is_some();
         let wide_capable = self.device_kind().sample_rates().last().is_some_and(|&r| r >= WIDEBAND_MIN_RATE);
-        let hover = if wide_capable { t.wideband_tooltip } else { t.wideband_unavailable };
+        let (label, hover) = match (wide, wide_capable) {
+            (true, _) => (t.narrowband, t.narrowband_tooltip),
+            (false, true) => (t.wideband, t.wideband_tooltip),
+            (false, false) => (t.wideband, t.wideband_unavailable),
+        };
+        let button = egui::Button::new(label).min_size(vec2(ui.available_width(), 26.0));
+        let button = if wide { button.fill(ACCENT.gamma_multiply(0.3)) } else { button };
         if ui
-            .add_enabled(wide_capable, egui::Button::new(t.wideband).min_size(vec2(ui.available_width(), 26.0)))
+            .add_enabled(wide || wide_capable, button)
             .on_hover_text(hover)
             .on_disabled_hover_text(hover)
             .clicked()
         {
-            self.wideband_view(ui.ctx());
+            if wide {
+                self.leave_wideband(ui.ctx());
+            } else {
+                self.wideband_view(ui.ctx());
+            }
         }
         if retune {
             self.retune(ui.ctx(), self.center_mhz);
@@ -720,6 +755,10 @@ impl QodaApp {
             ui.end_row();
             ui.label(RichText::new(t.bandwidth).color(MUTED));
             ui.label(RichText::new(format!("{:.0} kHz", self.occupied_khz())).monospace());
+            ui.end_row();
+            ui.label(RichText::new(t.uplink).color(MUTED)).on_hover_text(t.uplink_tooltip);
+            ui.label(RichText::new(format!("{:.3} MHz", self.selected_mhz - UPLINK_OFFSET_MHZ)).monospace().color(ACCENT))
+                .on_hover_text(t.uplink_tooltip);
             ui.end_row();
         });
         ui.add_space(4.0);
@@ -845,11 +884,31 @@ impl QodaApp {
 
     // ---- Central area ----
 
-    fn video(&self, ui: &mut egui::Ui, rect: Rect) {
+    fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        if self.fullscreen != on {
+            self.fullscreen = on;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
+    }
+
+    fn video(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let t = self.t();
+        let response = ui.interact(rect, ui.id().with("video"), Sense::click());
+        if response.double_clicked() {
+            self.set_fullscreen(ui.ctx(), !self.fullscreen);
+        }
+        // Full screen button in the top right corner: four corner brackets (inward when full screen).
+        let button = Rect::from_min_size(pos2(rect.right() - 44.0, rect.top() + 10.0), vec2(32.0, 32.0));
+        let button_response = ui.interact(button, ui.id().with("fullscreen"), Sense::click()).on_hover_text(t.fullscreen_tooltip);
+        if button_response.clicked() {
+            self.set_fullscreen(ui.ctx(), !self.fullscreen);
+        }
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, CornerRadius::same(10), DEEP);
-        painter.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        let corner = if self.fullscreen { CornerRadius::ZERO } else { CornerRadius::same(10) };
+        painter.rect_filled(rect, corner, if self.fullscreen { Color32::BLACK } else { DEEP });
+        if !self.fullscreen {
+            painter.rect_stroke(rect, corner, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        }
         // Fit a 16:9 area into the rectangle.
         let aspect = VIDEO_WIDTH as f32 / VIDEO_HEIGHT as f32;
         let inner = rect.shrink(6.0);
@@ -885,6 +944,20 @@ impl QodaApp {
                 painter.rect_filled(badge, CornerRadius::same(6), Color32::from_black_alpha(170));
                 painter.circle_filled(pos2(at.x - 12.0, at.y + galley.size().y / 2.0), 4.5, BAD);
                 painter.galley(at, galley, TEXT);
+            }
+        }
+        // The button stays faint until the mouse is over the picture.
+        if response.hovered() || button_response.hovered() {
+            let alpha = if button_response.hovered() { 220 } else { 150 };
+            painter.rect_filled(button, CornerRadius::same(6), Color32::from_black_alpha(alpha));
+            let stroke = Stroke::new(2.0, if button_response.hovered() { ACCENT } else { TEXT });
+            let b = button.shrink(8.0);
+            let arm = 5.0;
+            for (c, dx, dy) in [(b.left_top(), 1.0, 1.0), (b.right_top(), -1.0, 1.0), (b.left_bottom(), 1.0, -1.0), (b.right_bottom(), -1.0, -1.0)] {
+                // Brackets point outwards to enter full screen and inwards to leave it.
+                let (p, sx, sy) = if self.fullscreen { (c + vec2(dx * arm, dy * arm), -dx, -dy) } else { (c, dx, dy) };
+                painter.line_segment([p, p + vec2(sx * arm, 0.0)], stroke);
+                painter.line_segment([p, p + vec2(0.0, sy * arm)], stroke);
             }
         }
     }
@@ -935,15 +1008,24 @@ impl QodaApp {
             f += step;
         }
 
-        // Band occupied by the selected signal.
+        // Band occupied by the selected signal; green with a label once the decoder is locked on it.
+        let locked = self.locked_on_selection();
+        let color = if locked { GOOD } else { BAND };
         let half = self.occupied_khz() as f64 / 2000.0;
         let band = Rect::from_x_y_ranges(x_of(self.selected_mhz - half)..=x_of(self.selected_mhz + half), spec_rect.y_range());
-        painter.rect_filled(band, CornerRadius::ZERO, BAND.gamma_multiply(0.10));
+        painter.rect_filled(band, CornerRadius::ZERO, color.gamma_multiply(if locked { 0.18 } else { 0.10 }));
+        let edge = if locked { Stroke::new(2.0, color) } else { Stroke::new(1.0, color.gamma_multiply(0.5)) };
         for x in [band.left(), band.right()] {
-            painter.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], Stroke::new(1.0, BAND.gamma_multiply(0.5)));
+            painter.line_segment([pos2(x, spec_rect.top()), pos2(x, spec_rect.bottom())], edge);
         }
         let sx = x_of(self.selected_mhz);
-        painter.line_segment([pos2(sx, spec_rect.top()), pos2(sx, wf_rect.bottom())], Stroke::new(1.0, BAND.gamma_multiply(0.8)));
+        painter.line_segment([pos2(sx, spec_rect.top()), pos2(sx, wf_rect.bottom())], Stroke::new(1.0, color.gamma_multiply(0.8)));
+        if locked {
+            let galley = painter.layout_no_wrap(self.t().locked.to_uppercase(), FontId::proportional(11.0), DEEP);
+            let tag = Rect::from_center_size(pos2(sx, spec_rect.top() + 12.0), galley.size() + vec2(12.0, 4.0));
+            painter.rect_filled(tag, CornerRadius::same(4), GOOD);
+            painter.galley(tag.min + vec2(6.0, 2.0), galley, DEEP);
+        }
 
         // Spectrum: gradient fill below, line on top.
         if !self.smoothed.is_empty() {
@@ -1056,6 +1138,11 @@ impl QodaApp {
         self.spectrum(ui, spec);
     }
 
+    /// Whether the decoder is locked on the selected signal (not on settings about to change).
+    fn locked_on_selection(&self) -> bool {
+        self.pending_restart.is_none() && self.decoder.as_ref().is_some_and(|d| d.status.lock().unwrap().stats.locked)
+    }
+
     /// Service name and provider of the decoded signal (while watching, once read).
     fn service_title(&self) -> Option<(String, Option<String>)> {
         let d = self.decoder.as_ref()?;
@@ -1087,6 +1174,19 @@ impl eframe::App for QodaApp {
                 self.start_watch(&ctx);
             } else {
                 ctx.request_repaint_after(RESTART_DELAY);
+            }
+        }
+
+        if self.fullscreen {
+            if self.decoder.is_none() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.set_fullscreen(&ctx, false);
+            } else {
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(ui, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    ui.allocate_rect(rect, Sense::hover());
+                    self.video(ui, rect);
+                });
+                return;
             }
         }
 
