@@ -10,7 +10,7 @@ All notable changes to QODA are listed here. The format follows
 
 ### Fixed
 - Signals less than 6 dB above the noise floor were not detected, so with a small dish the
-  QO-100 beacon (about 4 dB above the floor on 75 cm) was not found and its symbol rate not set.
+  QO-100 beacon (about 4 dB above the floor on 60 cm) was not found and its symbol rate not set.
   The limit is now 3 dB.
 
 ## [0.1.2] - 2026-10-31

@@ -13,7 +13,7 @@ const COMMON_SYMBOL_RATES: [f64; 9] = [
 /// Relative difference allowed for rounding a measured rate to a common value.
 const SNAP_TOLERANCE: f64 = 0.06;
 /// Minimum level above the floor for something to count as a signal (dB). QPSK 1/2 decodes
-/// about 1 dB above the floor, and a 75 cm dish shows the QO-100 beacon only ~4 dB above it.
+/// about 1 dB above the floor, and a 60 cm dish shows the QO-100 beacon only ~4 dB above it.
 const MIN_SNR_DB: f32 = 3.0;
 /// The spectrum is smoothed over this width (Hz).
 const SMOOTH_HZ: f64 = 10e3;
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(d.common_symbol_rate, Some(333e3), "{d:?}");
     }
 
-    /// The beacon as a 75 cm dish shows it: about 4 dB above the floor.
+    /// The beacon as a 60 cm dish shows it: about 4 dB above the floor.
     #[test]
     fn finds_weak_signal() {
         let (n, fs) = (4096, 4e6);
