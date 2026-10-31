@@ -582,6 +582,73 @@ mod tests {
         .unwrap();
     }
 
+    /// Shapes the symbols with RRC, adds white noise at exactly `esn0_db` Es/N0 (measured from the
+    /// shaped signal, so it does not depend on the pulse scaling) and decodes them.
+    fn decode_esn0(symbols: &[Complex<f32>], esn0_db: f64, seed: u64) -> ReceiverStats {
+        let mut x = shape(symbols, SPS, ROLLOFF, 0.3);
+        let power = x.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / x.len() as f64;
+        // Es = power * SPS (energy per symbol); N0 = noise variance per sample.
+        let sigma = (power * SPS / 10f64.powf(esn0_db / 10.0) / 2.0).sqrt() as f32;
+        let mut rng = Lcg(seed);
+        let mut uniform = || {
+            let bits: u32 = (0..24).fold(0, |a, _| (a << 1) | rng.next_bit() as u32);
+            (bits as f32 + 0.5) / (1u32 << 24) as f32
+        };
+        for z in &mut x {
+            let (u1, u2) = (uniform(), uniform());
+            *z += Complex::from_polar((-2.0 * u1.ln()).sqrt() * sigma, std::f32::consts::TAU * u2);
+        }
+        let mut rx = Receiver::new(ReceiverConfig { sample_rate: SPS * 1e6, offset_hz: 0.0, symbol_rate: 1e6, rolloff: ROLLOFF });
+        let mut ts = Vec::new();
+        for chunk in x.chunks(50_000) {
+            rx.process(chunk, &mut ts);
+        }
+        rx.finish(&mut ts);
+        rx.stats.clone()
+    }
+
+    /// Sensitivity sweep: frame success rate against Es/N0 for each MODCOD, next to the
+    /// quasi-error-free threshold of EN 302 307-1 Table 13 (normal frames, ideal receiver).
+    /// `cargo test --release --lib sensitivity_sweep -- --ignored --nocapture`
+    /// QODA_SWEEP_CODES=4,9 limits the MODCODs; QODA_SWEEP_FRAMES sets frames per point.
+    #[test]
+    #[ignore]
+    fn sensitivity_sweep() {
+        const SPEC: [(u8, &str, f64); 17] = [
+            (1, "QPSK 1/4", -2.35), (2, "QPSK 1/3", -1.24), (3, "QPSK 2/5", -0.30), (4, "QPSK 1/2", 1.00),
+            (5, "QPSK 3/5", 2.23), (6, "QPSK 2/3", 3.10), (7, "QPSK 3/4", 4.03), (8, "QPSK 4/5", 4.68),
+            (9, "QPSK 5/6", 5.18), (10, "QPSK 8/9", 6.20), (11, "QPSK 9/10", 6.42), (12, "8PSK 3/5", 5.50),
+            (13, "8PSK 2/3", 6.62), (14, "8PSK 3/4", 7.91), (15, "8PSK 5/6", 9.35), (16, "8PSK 8/9", 10.69),
+            (17, "8PSK 9/10", 10.98),
+        ];
+        let only: Option<Vec<u8>> = std::env::var("QODA_SWEEP_CODES").ok().map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect());
+        let frames: usize = std::env::var("QODA_SWEEP_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+        println!("{:<10} {:>6} {:>8}  offset from spec (dB): frames ok/LDPC failed", "MODCOD", "spec", "QODA");
+        for &(modcod, name, spec) in &SPEC {
+            if only.as_ref().is_some_and(|o| !o.contains(&modcod)) {
+                continue;
+            }
+            let symbols = synthetic_frames((modcod << 2) | 1, frames);
+            let mut row = String::new();
+            let mut threshold = None;
+            let mut offset = -1.0;
+            while offset <= 4.0 {
+                let s = decode_esn0(&symbols, spec + offset, 7 + modcod as u64);
+                // The first frame is spent on acquisition, so count against frames - 1.
+                let ok = s.frames_ok.min(frames as u64 - 1);
+                // ok/failed: frames missing from both were lost before LDPC (sync).
+                row += &format!(" {offset:+.1}:{ok}/{}", s.frames_failed);
+                if ok == frames as u64 - 1 {
+                    threshold = Some(spec + offset);
+                    break;
+                }
+                offset += 0.5;
+            }
+            let t = threshold.map_or("  >+4".to_string(), |t| format!("{t:>6.2}"));
+            println!("{name:<10} {spec:>6.2} {t:>8} {row}");
+        }
+    }
+
     #[test]
     fn decodes_synthetic_16apsk() {
         // 16APSK 3/4, short frame, with pilots.
