@@ -6,6 +6,8 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-31
+
 ### Fixed
 - Signals less than 6 dB above the noise floor were not detected, so with a small dish the
   QO-100 beacon (about 4 dB above the floor on 75 cm) was not found and its symbol rate not set.
@@ -84,7 +86,8 @@ First release.
 - Windows package with SoapySDR, the RTL-SDR and HackRF drivers and libiio, in two variants:
   with and without FFmpeg. `qoda --diagnose` reports what the program finds.
 
-[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/sozden/QODA/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/sozden/QODA/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/sozden/QODA/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sozden/QODA/releases/tag/v0.1.0
