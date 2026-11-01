@@ -273,8 +273,12 @@ impl IioTx {
         self.write_attr(self.tx_lo, "frequency", &format!("{}", hz.round() as i64))
     }
 
-    /// Sets the sample rate and opens the analog filter to it.
+    /// Sets the sample rate and opens the analog filter to it. The programmable FIR filter is
+    /// switched off first: a filter left loaded by another program (SDR-Console, for its own rate)
+    /// tilted the signal by 5 dB across 150 kHz on the air. The AD9361 reaches 2.083 MS/s and
+    /// more without it.
     pub fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
+        self.write_attr(self.tx_config, "filter_fir_en", "0")?;
         self.write_attr(self.tx_config, "sampling_frequency", &format!("{}", rate.round() as i64))?;
         let bandwidth = rate.clamp(200_000.0, 40_000_000.0);
         self.write_attr(self.tx_config, "rf_bandwidth", &format!("{}", bandwidth.round() as i64))
