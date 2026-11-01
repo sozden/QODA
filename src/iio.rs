@@ -31,6 +31,8 @@ struct Api {
     buffer_destroy: unsafe extern "C" fn(Ptr),
     buffer_push: unsafe extern "C" fn(Ptr) -> isize,
     debug_attr_write: unsafe extern "C" fn(Ptr, *const c_char, *const c_char) -> isize,
+    attr_read: unsafe extern "C" fn(Ptr, *const c_char, *mut c_char, usize) -> isize,
+    device_attr_read: unsafe extern "C" fn(Ptr, *const c_char, *mut c_char, usize) -> isize,
     // The library must stay open as long as the function pointers are valid.
     _lib: Library,
 }
@@ -74,6 +76,8 @@ impl Api {
                 buffer_destroy: sym!("iio_buffer_destroy"),
                 buffer_push: sym!("iio_buffer_push"),
                 debug_attr_write: sym!("iio_device_debug_attr_write"),
+                attr_read: sym!("iio_channel_attr_read"),
+                device_attr_read: sym!("iio_device_attr_read"),
                 _lib: lib,
             })
         }
@@ -292,6 +296,32 @@ impl IioTx {
     pub fn set_loopback(&mut self, mode: u8) -> Result<(), String> {
         let n = unsafe { (self.api.debug_attr_write)(self.phy, cstr("loopback").as_ptr(), cstr(&mode.to_string()).as_ptr()) };
         if n < 0 { Err(format!("loopback={mode}: error {n}")) } else { Ok(()) }
+    }
+
+    /// The transmit path settings the device reports (rates through the interpolation chain,
+    /// FIR filter, analog bandwidth, attenuation), one "name: value" per line, for diagnosis.
+    pub fn describe(&self) -> String {
+        let read = |f: &dyn Fn(*mut c_char, usize) -> isize| {
+            let mut buf = vec![0u8; 512];
+            let n = f(buf.as_mut_ptr() as *mut c_char, buf.len());
+            if n <= 0 {
+                return "?".to_string();
+            }
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(n as usize);
+            String::from_utf8_lossy(&buf[..end]).trim().to_string()
+        };
+        let mut out = String::new();
+        for attr in ["tx_path_rates", "trx_rate_governor", "ensm_mode"] {
+            let v = read(&|p, l| unsafe { (self.api.device_attr_read)(self.phy, cstr(attr).as_ptr(), p, l) });
+            out += &format!("{attr}: {v}\n");
+        }
+        for attr in ["sampling_frequency", "rf_bandwidth", "filter_fir_en", "hardwaregain", "rf_port_select"] {
+            let v = read(&|p, l| unsafe { (self.api.attr_read)(self.tx_config, cstr(attr).as_ptr(), p, l) });
+            out += &format!("{attr}: {v}\n");
+        }
+        let v = read(&|p, l| unsafe { (self.api.attr_read)(self.tx_lo, cstr("frequency").as_ptr(), p, l) });
+        out += &format!("tx_lo: {v}\n");
+        out
     }
 
     /// Number of samples one `write` call takes.

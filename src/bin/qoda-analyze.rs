@@ -36,11 +36,13 @@ struct Args {
     stream: bool,
     /// Ratio of the noise added for testing to the recording's mean power (dB).
     noise_db: Option<f64>,
+    /// Print a fine spectrum over `--freq ± span` (Hz).
+    psd: Option<f64>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, profile: false, rolloff: None, stream: false, noise_db: None };
+    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, profile: false, rolloff: None, stream: false, noise_db: None, psd: None };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
@@ -54,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
             "--scan" => args.scan = true,
             "--profile" => args.profile = true,
             "--noise" => args.noise_db = Some(num(it.next(), &a)?),
+            "--psd" => args.psd = Some(num(it.next(), &a)? * 1e3),
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}")),
             _ => args.path = PathBuf::from(a),
         }
@@ -104,6 +107,10 @@ fn run() -> Result<(), String> {
     }
     if args.scan {
         print_scan(&db, fs, rec.frequency);
+        return Ok(());
+    }
+    if let Some(span) = args.psd {
+        print_psd(&x, fs, rec.frequency, args.freq.unwrap_or(rec.frequency), span);
         return Ok(());
     }
     let guess = match args.freq {
@@ -457,6 +464,29 @@ fn print_profile(db: &[f32], fs: f64, center_hz: f64) {
     for (i, l) in levels.iter().enumerate() {
         let f = center_hz + ((i as f64 + 0.5) / slices as f64 - 0.5) * fs;
         println!("{:>11.3} MHz {:>7.1} dB {}", f / 1e6, l, "#".repeat(((l - low) * 1.5) as usize));
+    }
+}
+
+/// Prints a fine power spectrum (whole recording, 32768-point FFT) in 5 kHz steps over
+/// `center ± span`, relative to its lowest level: the shape of one signal, e.g. to look for
+/// tilt or asymmetry.
+fn print_psd(x: &[Complex<f32>], fs: f64, rec_hz: f64, center_hz: f64, span_hz: f64) {
+    let n = 32_768;
+    let db = Spectrum::new(n).compute(x);
+    let bin = fs / n as f64;
+    let step = (5e3 / bin).round().max(1.0) as usize;
+    let index = |f: f64| ((f - rec_hz) / bin + n as f64 / 2.0).round() as isize;
+    let (lo, hi) = (index(center_hz - span_hz).max(0) as usize, (index(center_hz + span_hz) as usize).min(n - 1));
+    let rows: Vec<(f64, f32)> = (lo..hi)
+        .step_by(step)
+        .map(|i| {
+            let lin = db[i..(i + step).min(n)].iter().map(|v| 10f64.powf(*v as f64 / 10.0)).sum::<f64>() / step as f64;
+            (rec_hz + ((i + step / 2) as f64 - n as f64 / 2.0) * bin, (10.0 * lin.log10()) as f32)
+        })
+        .collect();
+    let low = rows.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
+    for (f, l) in rows {
+        println!("{:>13.4} MHz {:>6.1} dB {}", f / 1e6, l - low, "#".repeat(((l - low) * 3.0) as usize));
     }
 }
 

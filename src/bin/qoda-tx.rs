@@ -355,6 +355,10 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
     radio.set_frequency(tx_hz)?;
     install_stop_handler();
     println!();
+    // What the device made of the settings, for diagnosing the transmit path.
+    for line in radio.describe().lines() {
+        println!("    pluto {line}");
+    }
     if args.loopback {
         // The LO stays powered down and the attenuation at maximum, as `open` left them.
         radio.set_loopback(1)?;
