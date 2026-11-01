@@ -29,6 +29,12 @@ All notable changes to QODA are listed here. The format follows
   through the digital loopback, an ON AIR banner with time and achieved sample rate, and a log.
   English and Turkish; settings are kept in `tx-settings.txt` next to QODA's settings. The
   transmit logic moved to `qoda::transmit`, shared with `qoda-tx`.
+- The transmitter plays its TS as one endless stream, modulated as it is sent: on every pass
+  the continuity counters carry on and PCR/PTS/DTS move on by the length of the file, so the
+  20 s test broadcast loops without the continuity errors and the picture hiccup at each restart.
+  The test broadcast is muxed at the channel's rate to the bit. Transmitting starts sooner, as
+  the signal is no longer modulated in advance. `qoda-tx --out … --loops N` writes N passes as
+  sent on air; `qoda-analyze --stream` reports continuity errors.
 - Automatic frequency correction while watching: when the decoder measures the carrier more than
   1.5% of the symbol rate (at least 1 kHz) off the selected frequency, QODA moves the selection
   onto it and restarts the decoder.

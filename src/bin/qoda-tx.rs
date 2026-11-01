@@ -30,6 +30,8 @@ struct Args {
     /// `--freq` was given.
     freq_given: bool,
     air: AirSettings,
+    /// With `--out`: write this many passes of the endless stream as sent on air.
+    loops: u32,
 }
 
 const USAGE: &str = "usage:
@@ -40,6 +42,7 @@ signal options: [--rs kS/s] [--modcod \"QPSK 1/2\"] [--short] [--no-pilots] [--r
   middle of the signal (default 1.5 x half the bandwidth + 50 kHz; 0 turns it off)
 --loopback with --pluto sends the samples at the real rate but only through the chip's digital loopback,
   with the transmitter off: checks that the link keeps up without radiating anything
+--loops N with --out writes N passes of the endless stream exactly as sent on air (shifted from the centre)
 --pattern makes a test broadcast (test card, 1 kHz tone, the call sign as service name) at the channel's exact bit rate";
 
 fn parse_args() -> Result<Args, String> {
@@ -64,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
             seconds: transmit::DEFAULT_SECONDS,
             loopback: false,
         },
+        loops: 0,
     };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
@@ -89,6 +93,7 @@ fn parse_args() -> Result<Args, String> {
             "--level" => args.air.level_dbfs = num(it.next(), &a)?,
             "--seconds" => args.air.seconds = num(it.next(), &a)?,
             "--loopback" => args.air.loopback = true,
+            "--loops" => args.loops = num(it.next(), &a)? as u32,
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}\n{USAGE}")),
             _ if args.input.as_os_str().is_empty() => args.input = PathBuf::from(a),
             _ => return Err(USAGE.into()),
@@ -130,26 +135,38 @@ fn run() -> Result<(), String> {
     let sps = plan.samples_per_symbol(transmitting);
     let sample_rate = plan.sample_rate(transmitting);
     println!(
-        "{} TS packets in, {}: TS capacity {:.1} kbit/s at {:.0} kS/s, {} samples/symbol = {:.3} MS/s",
+        "{} TS packets in ({:.1} s at the channel rate), {}: TS capacity {:.1} kbit/s at {:.0} kS/s, {} samples/symbol = {:.3} MS/s",
         packets.len() / TS_LEN,
+        (packets.len() * 8) as f64 / capacity,
         transmit::modcod_name(plan.cfg.modcod),
         capacity / 1e3,
         plan.symbol_rate / 1e3,
         sps,
         sample_rate / 1e6
     );
-    let samples = transmit::modulate(&packets, plan.cfg, sps)?;
-    println!("Modulated {:.2} s of signal ({} samples).", samples.len() as f64 / sample_rate, samples.len());
 
     match (&args.output, &args.pluto) {
-        (Some(out), _) => write_recording(out, &samples, sample_rate, plan.downlink_hz, plan.symbol_rate),
+        (Some(out), _) if args.loops > 0 => {
+            // The endless stream as sent on air, `loops` passes of it; the signal sits `shift`
+            // above the recording's centre frequency, at the downlink frequency.
+            let air_rate = plan.sample_rate(true);
+            let n = (args.loops as f64 * (packets.len() * 8) as f64 / capacity * air_rate) as usize;
+            let mut source = transmit::AirSource::new(packets, &plan, args.air.level_dbfs)?;
+            let mut samples = Vec::new();
+            source.fill(&mut samples, n);
+            write_recording(out, &samples, air_rate, plan.downlink_hz - plan.shift(), plan.symbol_rate)
+        }
+        (Some(out), _) => {
+            let samples = transmit::modulate(&packets, plan.cfg, sps)?;
+            write_recording(out, &samples, sample_rate, plan.downlink_hz, plan.symbol_rate)
+        }
         (None, Some(uri)) => {
             plan.check_band()?;
             args.air.check()?;
-            let prepared = transmit::prepare_for_air(&samples, args.air.level_dbfs, plan.shift(), sample_rate);
             install_stop_handler();
             println!();
-            let summary = transmit::transmit(uri, &prepared, &plan, &args.air, &STOP, &mut |r| match r {
+            // The file plays as an endless stream, modulated as it is sent.
+            let summary = transmit::transmit(uri, packets, &plan, &args.air, &STOP, &mut |r| match r {
                 Report::Info(line) => println!("    {line}"),
                 Report::Warning(text) => println!("\nWARNING: {text}"),
                 Report::Started if args.air.loopback => println!("    Ctrl+C stops"),

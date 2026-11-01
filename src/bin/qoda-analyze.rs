@@ -420,11 +420,12 @@ fn run_stream(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64
         s.locked, s.frames_ok, s.frames_failed, s.bch_errors, s.frames_unsupported
     );
     println!(
-        "  SNR {:.1} dB, carrier offset {:+.2} kHz, {} TS packets, {} CRC errors",
+        "  SNR {:.1} dB, carrier offset {:+.2} kHz, {} TS packets, {} CRC errors, {} continuity errors",
         s.snr_db,
         s.carrier_offset_hz / 1e3,
         s.ts_packets,
-        s.ts_crc_errors
+        s.ts_crc_errors,
+        s.ts_cc_errors
     );
     if let Some(p) = s.pls {
         println!("  {}", p.describe());

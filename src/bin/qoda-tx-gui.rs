@@ -184,16 +184,16 @@ impl TxApp {
                     Ok(path) => path,
                 };
                 let packets = transmit::read_ts(&input)?;
-                let sps = plan.samples_per_symbol(true);
                 let rate = plan.sample_rate(true);
-                let samples = transmit::modulate(&packets, plan.cfg, sps)?;
-                log(MUTED, format!("{:.1} s of signal at {:.3} MS/s, repeated while on air", samples.len() as f64 / rate, rate / 1e6));
-                let prepared = transmit::prepare_for_air(&samples, air.level_dbfs, plan.shift(), rate);
+                log(
+                    MUTED,
+                    format!("{:.1} s of TS played as an endless stream, {:.3} MS/s to the Pluto", (packets.len() * 8) as f64 / capacity, rate / 1e6),
+                );
                 if stop_t.load(Ordering::Relaxed) {
                     return Ok(());
                 }
                 shared_t.lock().unwrap().preparing = false;
-                let summary = transmit::transmit(&uri, &prepared, &plan, &air, &stop_t, &mut |r| match r {
+                let summary = transmit::transmit(&uri, packets, &plan, &air, &stop_t, &mut |r| match r {
                     Report::Info(text) => log(MUTED, text),
                     Report::Warning(text) => log(WARN, text),
                     Report::Started => {

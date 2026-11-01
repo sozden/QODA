@@ -157,13 +157,15 @@ pub fn make_pattern(call: &str, caption: &str, capacity: f64) -> Result<(PathBuf
     let caption: String = caption.chars().filter(|c| !matches!(c, '\'' | '\\' | ':' | '%' | ',' | ';')).collect();
     let ffmpeg = crate::ffmpeg::find_tool("ffmpeg").ok_or("FFmpeg not found; it is needed for the test broadcast")?;
     let mux = (capacity / 1000.0).floor() as u32;
+    // Muxed at the channel's rate to the bit, so the looped stream's clock runs in real time.
+    let mux_bps = capacity.floor() as u64;
     let path = std::env::temp_dir().join(format!("qoda-pattern-{mux}k.ts"));
     // FFmpeg exceeds the mux rate when the streams do not fit; the audio packets and tables
     // cost much more than their nominal rate at low rates. Measure and lower the video rate.
     let audio = if capacity < LOW_RATE { 0.0 } else { 40e3 };
     let mut video = ((capacity * 0.80 - audio) / 1000.0).max(20.0);
     for _ in 0..5 {
-        run_ffmpeg_pattern(&ffmpeg, &call, &caption, capacity, video as u32, mux, &path)?;
+        run_ffmpeg_pattern(&ffmpeg, &call, &caption, capacity, video as u32, mux_bps, &path)?;
         let bytes = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
         // A file that fits is padded to the mux rate, but FFmpeg runs slightly past the
         // duration, so it measures up to ~1% above the mux rate; a real overflow is far more.
@@ -209,7 +211,7 @@ fn pattern_filter(size: &str, fps: u32, call: &str, caption: &str) -> String {
     f
 }
 
-fn run_ffmpeg_pattern(ffmpeg: &Path, call: &str, caption: &str, capacity: f64, video: u32, mux: u32, path: &Path) -> Result<(), String> {
+fn run_ffmpeg_pattern(ffmpeg: &Path, call: &str, caption: &str, capacity: f64, video: u32, mux_bps: u64, path: &Path) -> Result<(), String> {
     // The card is still, so it takes few bits; the size grows with the channel.
     let (size, fps) = match capacity {
         c if c < LOW_RATE => ("320x180", 10),
@@ -229,7 +231,7 @@ fn run_ffmpeg_pattern(ffmpeg: &Path, call: &str, caption: &str, capacity: f64, v
         .args(["-g", &gop.to_string()])
         // Below ~100 kbit/s the tone's 32 kbit/s would leave too little for the picture.
         .args(if capacity < LOW_RATE { vec!["-an"] } else { vec!["-c:a", "mp2", "-b:a", "32k"] })
-        .args(["-f", "mpegts", "-muxrate", &format!("{mux}k")])
+        .args(["-f", "mpegts", "-muxrate", &mux_bps.to_string()])
         // FFmpeg's default PCR every 20 ms takes a packet of its own at low rates (75 kbit/s);
         // DVB allows up to 100 ms. Tables every 0.5 s (PAT/PMT) and 1 s (SDT) instead of 0.1 s.
         .args(["-pcr_period", "80", "-pat_period", "0.5", "-sdt_period", "1"])
@@ -279,18 +281,161 @@ pub fn modulate(packets: &[u8], cfg: TxConfig, sps: usize) -> Result<Vec<Complex
     Ok(samples)
 }
 
-/// Scales to the DAC at a fixed RMS level, so the PA drive is set by the level and the
-/// attenuation, and moves the signal `shift` up from the LO. Where the loop wraps around the
-/// phase jumps once per pass, which the receiver's carrier tracking rides through.
-pub fn prepare_for_air(samples: &[Complex<f32>], level_dbfs: f64, shift_hz: f64, sample_rate: f64) -> Vec<Complex<f32>> {
-    let rms = (samples.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / samples.len().max(1) as f64).sqrt() as f32;
-    let scale = 10f32.powf(level_dbfs as f32 / 20.0) / rms.max(1e-12);
-    let step = std::f64::consts::TAU * shift_hz / sample_rate;
-    samples
-        .iter()
-        .enumerate()
-        .map(|(n, z)| z * scale * Complex::from_polar(1.0, (step * n as f64).rem_euclid(std::f64::consts::TAU) as f32))
-        .collect()
+/// Plays a TS file over and over as one endless stream: on every pass the continuity counters
+/// carry on from the previous pass and the clock references and time stamps (PCR, PTS, DTS)
+/// move on by the length of the file, so a receiver sees no gap or jump where it starts again.
+pub struct TsLooper {
+    packets: Vec<u8>,
+    /// Packets carrying payload per PID in one pass (continuity counters step only on those).
+    payload_packets: std::collections::HashMap<u16, u64>,
+    /// Length of one pass in 90 kHz ticks.
+    pass_ticks: u64,
+    pass: u64,
+    index: usize,
+}
+
+const PTS_WRAP: u64 = 1 << 33;
+const NULL_PID: u16 = 0x1FFF;
+
+impl TsLooper {
+    /// `bitrate`: the rate the file is muxed at and sent at (bit/s); one pass lasts its length
+    /// at that rate.
+    pub fn new(packets: Vec<u8>, bitrate: f64) -> Result<Self, String> {
+        if packets.len() < TS_LEN {
+            return Err("the TS file has no packets".into());
+        }
+        let mut payload_packets = std::collections::HashMap::new();
+        for p in packets.chunks_exact(TS_LEN) {
+            let pid = Self::pid(p);
+            if pid != NULL_PID && p[3] & 0x10 != 0 {
+                *payload_packets.entry(pid).or_insert(0) += 1;
+            }
+        }
+        let pass_ticks = ((packets.len() * 8) as f64 / bitrate * 90_000.0).round() as u64;
+        Ok(Self { packets, payload_packets, pass_ticks, pass: 0, index: 0 })
+    }
+
+    fn pid(p: &[u8]) -> u16 {
+        (((p[1] & 0x1F) as u16) << 8) | p[2] as u16
+    }
+
+    /// The next packet of the endless stream.
+    pub fn next_packet(&mut self) -> [u8; TS_LEN] {
+        let mut p = [0u8; TS_LEN];
+        p.copy_from_slice(&self.packets[self.index..self.index + TS_LEN]);
+        if self.pass > 0 {
+            self.continue_packet(&mut p);
+        }
+        self.index += TS_LEN;
+        if self.index == self.packets.len() {
+            self.index = 0;
+            self.pass += 1;
+        }
+        p
+    }
+
+    fn continue_packet(&self, p: &mut [u8; TS_LEN]) {
+        let pid = Self::pid(p);
+        if pid == NULL_PID {
+            return;
+        }
+        // Continuity counter: moved on by the packets of this PID in the earlier passes.
+        let step = (self.pass * self.payload_packets.get(&pid).copied().unwrap_or(0) % 16) as u8;
+        p[3] = (p[3] & 0xF0) | ((p[3] & 0x0F) + step) % 16;
+        let delta = self.pass * self.pass_ticks % PTS_WRAP;
+        let mut payload_start = 4;
+        // PCR in the adaptation field: 33-bit base at 90 kHz and a 9-bit extension.
+        if p[3] & 0x20 != 0 {
+            let length = p[4] as usize;
+            payload_start = 5 + length;
+            if length >= 7 && p[5] & 0x10 != 0 {
+                let b = &p[6..12];
+                let base = ((b[0] as u64) << 25) | ((b[1] as u64) << 17) | ((b[2] as u64) << 9) | ((b[3] as u64) << 1) | ((b[4] as u64) >> 7);
+                let base = (base + delta) % PTS_WRAP;
+                p[6] = (base >> 25) as u8;
+                p[7] = (base >> 17) as u8;
+                p[8] = (base >> 9) as u8;
+                p[9] = (base >> 1) as u8;
+                p[10] = (p[10] & 0x7F) | (((base & 1) as u8) << 7);
+            }
+        }
+        // PTS and DTS in a PES header that starts in this packet.
+        if p[1] & 0x40 != 0 && payload_start + 14 <= TS_LEN && p[payload_start..payload_start + 3] == [0, 0, 1] {
+            let flags = p[payload_start + 7] >> 6;
+            let at = payload_start + 9;
+            if flags & 0b10 != 0 && at + 5 <= TS_LEN {
+                Self::add_timestamp(&mut p[at..at + 5], delta);
+            }
+            if flags == 0b11 && at + 10 <= TS_LEN {
+                Self::add_timestamp(&mut p[at + 5..at + 10], delta);
+            }
+        }
+    }
+
+    /// Adds `delta` to a 5-byte PES time stamp, keeping its marker bits and prefix.
+    fn add_timestamp(b: &mut [u8], delta: u64) {
+        let value = (((b[0] as u64 >> 1) & 0x07) << 30) | ((b[1] as u64) << 22) | (((b[2] as u64) >> 1) << 15) | ((b[3] as u64) << 7) | ((b[4] as u64) >> 1);
+        let v = (value + delta) % PTS_WRAP;
+        b[0] = (b[0] & 0xF1) | (((v >> 30) as u8 & 0x07) << 1);
+        b[1] = (v >> 22) as u8;
+        b[2] = (((v >> 15) as u8) << 1) | 1;
+        b[3] = (v >> 7) as u8;
+        b[4] = ((v as u8) << 1) | 1;
+    }
+}
+
+/// Produces the samples for the DAC as they are sent: the TS looped endlessly, modulated,
+/// RRC-shaped, scaled to a fixed RMS level (so the PA drive is set by the level and the
+/// attenuation) and moved `shift` up from the LO.
+pub struct AirSource {
+    looper: TsLooper,
+    modulator: Modulator,
+    shaper: Shaper,
+    data_field: usize,
+    shaped: Vec<Complex<f32>>,
+    position: usize,
+    scale: f32,
+    phase: f64,
+    step: f64,
+}
+
+impl AirSource {
+    pub fn new(packets: Vec<u8>, plan: &Plan, level_dbfs: f64) -> Result<Self, String> {
+        let capacity = plan.capacity().ok_or("invalid MODCOD and frame size")?;
+        let sps = plan.samples_per_symbol(true);
+        Ok(Self {
+            looper: TsLooper::new(packets, capacity)?,
+            modulator: Modulator::new(plan.cfg)?,
+            shaper: Shaper::new(sps, plan.cfg.rolloff),
+            data_field: plan.cfg.data_field_bytes().ok_or("invalid MODCOD")?,
+            shaped: Vec::new(),
+            position: 0,
+            // The shaped signal of a unit-energy constellation has unit RMS.
+            scale: 10f32.powf(level_dbfs as f32 / 20.0),
+            phase: 0.0,
+            step: std::f64::consts::TAU * plan.shift() / plan.sample_rate(true),
+        })
+    }
+
+    /// Replaces `out` with the next `n` samples.
+    pub fn fill(&mut self, out: &mut Vec<Complex<f32>>, n: usize) {
+        while self.shaped.len() - self.position < n {
+            self.shaped.drain(..self.position);
+            self.position = 0;
+            while self.modulator.queued() < self.data_field {
+                self.modulator.push_ts(&self.looper.next_packet());
+            }
+            if let Some(frame) = self.modulator.next_frame() {
+                self.shaper.process(&frame, &mut self.shaped);
+            }
+        }
+        out.clear();
+        for z in &self.shaped[self.position..self.position + n] {
+            out.push(z * self.scale * Complex::from_polar(1.0, self.phase as f32));
+            self.phase = (self.phase + self.step).rem_euclid(std::f64::consts::TAU);
+        }
+        self.position += n;
+    }
 }
 
 /// How a transmission runs.
@@ -336,11 +481,11 @@ pub struct Summary {
     pub starved: bool,
 }
 
-/// Sends `samples` (already prepared for the DAC) in a loop until `settings.seconds` pass or
-/// `stop` is set. The transmitter is off before and after.
+/// Sends `packets` (whole TS packets, muxed at the channel's capacity) as an endless stream
+/// until `settings.seconds` pass or `stop` is set. The transmitter is off before and after.
 pub fn transmit(
     uri: &str,
-    samples: &[Complex<f32>],
+    packets: Vec<u8>,
     plan: &Plan,
     settings: &AirSettings,
     stop: &AtomicBool,
@@ -348,11 +493,11 @@ pub fn transmit(
 ) -> Result<Summary, String> {
     plan.check_band()?;
     settings.check()?;
-    if samples.is_empty() {
-        return Err("nothing to transmit".into());
-    }
+    let mut source = AirSource::new(packets, plan, settings.level_dbfs)?;
     let sample_rate = plan.sample_rate(true);
-    let mut radio = IioTx::open(uri)?;
+    // A bare address means the network: "192.168.2.1" → "ip:192.168.2.1".
+    let uri = if uri.contains(':') { uri.to_string() } else { format!("ip:{uri}") };
+    let mut radio = IioTx::open(&uri)?;
     // If the device refuses at its current rate, try again from a rate that needs no FIR.
     if radio.disable_fir().is_err() {
         radio.set_sample_rate(4e6)?;
@@ -389,19 +534,13 @@ pub fn transmit(
     let chunk = radio.buffer_samples();
     let started = Instant::now();
     let mut last_report = Instant::now();
-    let (mut position, mut sent, mut starved) = (0usize, 0usize, false);
+    let (mut sent, mut starved) = (0usize, false);
     let mut block = Vec::with_capacity(chunk);
     let result = loop {
         if stop.load(Ordering::Relaxed) || started.elapsed().as_secs_f64() >= settings.seconds {
             break Ok(());
         }
-        // Loop over the signal, wrapping around at its end.
-        block.clear();
-        while block.len() < chunk {
-            let take = (chunk - block.len()).min(samples.len() - position);
-            block.extend_from_slice(&samples[position..position + take]);
-            position = (position + take) % samples.len();
-        }
+        source.fill(&mut block, chunk);
         if let Err(e) = radio.write(&block) {
             break Err(e);
         }
@@ -460,6 +599,86 @@ mod tests {
         // Signal past the top of the band; LO below the bottom.
         assert!(plan(10499.0).check_band().is_err());
         assert!(plan(10491.1).check_band().is_err());
+    }
+
+    /// A short TS: PID 0x100 with a PES header (PTS) every 8 packets and PID 0x101 every other
+    /// packet, continuity counters from 0 like FFmpeg's.
+    fn test_ts(packets: usize) -> Vec<u8> {
+        let mut cc = [0u8; 2];
+        let mut out = Vec::new();
+        for i in 0..packets {
+            let which = if i % 2 == 0 { 0 } else { 1 };
+            let pid = 0x100 + which as u16;
+            let start = which == 0 && i % 8 == 0;
+            let mut p = vec![0x47, (pid >> 8) as u8 | if start { 0x40 } else { 0 }, pid as u8, 0x10 | cc[which]];
+            cc[which] = (cc[which] + 1) % 16;
+            if start {
+                // PES header with a PTS of 1000 + i·100 (90 kHz ticks).
+                let pts = 1000 + i as u64 * 100;
+                p.extend([0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5]);
+                p.extend([
+                    0x21 | (((pts >> 30) as u8 & 7) << 1),
+                    (pts >> 22) as u8,
+                    (((pts >> 15) as u8) << 1) | 1,
+                    (pts >> 7) as u8,
+                    ((pts as u8) << 1) | 1,
+                ]);
+            }
+            p.resize(TS_LEN, (i % 251) as u8);
+            out.extend(p);
+        }
+        out
+    }
+
+    fn read_pts(p: &[u8]) -> u64 {
+        let b = &p[13..18];
+        (((b[0] as u64 >> 1) & 7) << 30) | ((b[1] as u64) << 22) | (((b[2] as u64) >> 1) << 15) | ((b[3] as u64) << 7) | ((b[4] as u64) >> 1)
+    }
+
+    #[test]
+    fn looper_continues_counters_and_time_stamps() {
+        let n = 40;
+        let ts = test_ts(n);
+        let bitrate = 120_000.0;
+        let mut looper = TsLooper::new(ts, bitrate).unwrap();
+        let pass_ticks = ((n * TS_LEN * 8) as f64 / bitrate * 90_000.0).round() as u64;
+        let mut last_cc = std::collections::HashMap::new();
+        for i in 0..3 * n {
+            let p = looper.next_packet();
+            let pid = TsLooper::pid(&p);
+            let cc = p[3] & 0x0F;
+            if let Some(prev) = last_cc.insert(pid, cc) {
+                assert_eq!(cc, (prev + 1) % 16, "packet {i}, PID {pid:#x}");
+            }
+            if p[1] & 0x40 != 0 {
+                let k = i % n;
+                assert_eq!(read_pts(&p), 1000 + k as u64 * 100 + (i / n) as u64 * pass_ticks, "packet {i}");
+            }
+        }
+    }
+
+    /// The endless stream through QODA's receiver: three passes without a continuity error.
+    #[test]
+    fn air_source_loops_seamlessly() {
+        use crate::dvbs2::receiver::{Receiver, ReceiverConfig};
+        let p = Plan { symbol_rate: 1e6, ..plan(10496.0) };
+        let cfg = p.cfg;
+        let packets = test_ts(cfg.data_field_bytes().unwrap() * 3 / TS_LEN);
+        let mut source = AirSource::new(packets, &p, -7.0).unwrap();
+        let rate = p.sample_rate(true);
+        // Enough for the receiver's search window, three passes and a little more.
+        let n = (rate / p.symbol_rate) as usize * 33_282 * 12;
+        let mut x = Vec::new();
+        source.fill(&mut x, n);
+        let mut rx = Receiver::new(ReceiverConfig { sample_rate: rate, offset_hz: p.shift(), symbol_rate: p.symbol_rate, rolloff: 0.2 });
+        let mut ts = Vec::new();
+        for chunk in x.chunks(100_000) {
+            rx.process(chunk, &mut ts);
+        }
+        rx.finish(&mut ts);
+        assert!(rx.stats.frames_ok >= 8, "{} frames", rx.stats.frames_ok);
+        assert_eq!(rx.stats.frames_failed, 0);
+        assert_eq!(rx.stats.ts_cc_errors, 0);
     }
 
     #[test]
