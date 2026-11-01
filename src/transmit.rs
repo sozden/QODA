@@ -136,10 +136,25 @@ pub fn parse_modcod(text: &str) -> Result<u8, String> {
         .ok_or(format!("unknown MODCOD \"{text}\" (e.g. \"QPSK 1/2\", \"8PSK 2/3\")"))
 }
 
-/// Makes a test broadcast with FFmpeg: test card, 1 kHz tone, `call` as the service name. The
-/// TS is muxed at the channel's bit rate, so it plays at the right speed when sent in a loop.
+/// The text of the test card for a plan: frequency, symbol rate and MODCOD.
+pub fn pattern_caption(plan: &Plan) -> String {
+    format!(
+        "{:.3} MHz  ·  {:.0} kS/s  ·  {}",
+        plan.downlink_hz / 1e6,
+        plan.symbol_rate / 1e3,
+        modcod_name(plan.cfg.modcod)
+    )
+}
+
+/// Makes a test broadcast with FFmpeg: colour bars with the call sign, "QODA TX · QO-100 DATV"
+/// and `caption` below them, a frame counter that shows the picture is live, a 1 kHz tone and
+/// `call` as the service name. The picture is still, so even 125 kS/s carries it sharp. The TS is
+/// muxed at the channel's bit rate, so it plays at the right speed when sent in a loop.
 /// Returns the file and a one-line description.
-pub fn make_pattern(call: &str, capacity: f64) -> Result<(PathBuf, String), String> {
+pub fn make_pattern(call: &str, caption: &str, capacity: f64) -> Result<(PathBuf, String), String> {
+    // Only the characters of a call sign go into the FFmpeg filter text.
+    let call: String = call.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '/' || *c == '-').collect::<String>().to_uppercase();
+    let caption: String = caption.chars().filter(|c| !matches!(c, '\'' | '\\' | ':' | '%' | ',' | ';')).collect();
     let ffmpeg = crate::ffmpeg::find_tool("ffmpeg").ok_or("FFmpeg not found; it is needed for the test broadcast")?;
     let mux = (capacity / 1000.0).floor() as u32;
     let path = std::env::temp_dir().join(format!("qoda-pattern-{mux}k.ts"));
@@ -148,7 +163,7 @@ pub fn make_pattern(call: &str, capacity: f64) -> Result<(PathBuf, String), Stri
     let audio = if capacity < LOW_RATE { 0.0 } else { 40e3 };
     let mut video = ((capacity * 0.80 - audio) / 1000.0).max(20.0);
     for _ in 0..5 {
-        run_ffmpeg_pattern(&ffmpeg, call, capacity, video as u32, mux, &path)?;
+        run_ffmpeg_pattern(&ffmpeg, &call, &caption, capacity, video as u32, mux, &path)?;
         let bytes = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
         // A file that fits is padded to the mux rate, but FFmpeg runs slightly past the
         // duration, so it measures up to ~1% above the mux rate; a real overflow is far more.
@@ -165,16 +180,53 @@ pub fn make_pattern(call: &str, capacity: f64) -> Result<(PathBuf, String), Stri
     Err(format!("the test broadcast does not fit in {mux} kbit/s; use a higher symbol rate or code rate"))
 }
 
-fn run_ffmpeg_pattern(ffmpeg: &Path, call: &str, capacity: f64, video: u32, mux: u32, path: &Path) -> Result<(), String> {
-    let (size, fps) = if capacity < 200e3 { ("320x180", 15) } else { ("640x360", 25) };
+/// A font for the test card's text: (regular, bold). `None` makes a card without text.
+fn pattern_fonts() -> Option<(String, String)> {
+    let candidates: &[(&str, &str)] = &[
+        ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"),
+        ("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    ];
+    candidates
+        .iter()
+        .find(|(r, b)| Path::new(r).is_file() && Path::new(b).is_file())
+        // FFmpeg filter syntax: the colon of a drive letter is escaped.
+        .map(|(r, b)| (r.replace(':', "\\:"), b.replace(':', "\\:")))
+}
+
+/// The test card filter: colour bars on top, a dark band with the text below.
+fn pattern_filter(size: &str, fps: u32, call: &str, caption: &str) -> String {
+    let mut f = format!("smptebars=size={size}:rate={fps},drawbox=x=0:y=ih*0.62:w=iw:h=ih*0.40:color=0x0B0F16:t=fill");
+    if let Some((regular, bold)) = pattern_fonts() {
+        f += &format!(
+            ",drawtext=fontfile='{bold}':text='{call}':fontsize=h/7:fontcolor=white:x=(w-text_w)/2:y=h*0.645\
+             ,drawtext=fontfile='{regular}':text='QODA TX  ·  QO-100 DATV':fontsize=h/18:fontcolor=0x38C8F0:x=(w-text_w)/2:y=h*0.81\
+             ,drawtext=fontfile='{regular}':text='{caption}':fontsize=h/22:fontcolor=0xD6DEEB:x=(w-text_w)/2:y=h*0.89\
+             ,drawtext=fontfile='{regular}':text='%{{n}}':fontsize=h/22:fontcolor=white:box=1:boxcolor=black@0.6:x=w-text_w-8:y=8"
+        );
+    }
+    f
+}
+
+fn run_ffmpeg_pattern(ffmpeg: &Path, call: &str, caption: &str, capacity: f64, video: u32, mux: u32, path: &Path) -> Result<(), String> {
+    // The card is still, so it takes few bits; the size grows with the channel.
+    let (size, fps) = match capacity {
+        c if c < LOW_RATE => ("320x180", 10),
+        c if c < 200e3 => ("480x270", 15),
+        c if c < 600e3 => ("640x360", 25),
+        _ => ("960x540", 25),
+    };
+    // A key frame every 5 s at low rates (a still picture needs few), every 2 s otherwise.
+    let gop = if capacity < 200e3 { fps * 5 } else { fps * 2 };
     let mut cmd = std::process::Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "lavfi", "-i", &format!("testsrc2=size={size}:rate={fps}")])
+        .args(["-f", "lavfi", "-i", &pattern_filter(size, fps, call, caption)])
         .args(["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000"])
         .args(["-t", &PATTERN_SECONDS.to_string()])
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p"])
+        .args(["-c:v", "libx264", "-preset", "medium", "-tune", "stillimage", "-pix_fmt", "yuv420p"])
         .args(["-b:v", &format!("{video}k"), "-maxrate", &format!("{video}k"), "-bufsize", &format!("{}k", video * 2)])
-        .args(["-g", &(fps * 2).to_string()])
+        .args(["-g", &gop.to_string()])
         // Below ~100 kbit/s the tone's 32 kbit/s would leave too little for the picture.
         .args(if capacity < LOW_RATE { vec!["-an"] } else { vec!["-c:a", "mp2", "-b:a", "32k"] })
         .args(["-f", "mpegts", "-muxrate", &format!("{mux}k")])

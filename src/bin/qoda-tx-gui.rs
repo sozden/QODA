@@ -177,7 +177,7 @@ impl TxApp {
                 let capacity = plan.capacity().ok_or("invalid MODCOD")?;
                 let input = match source {
                     Err(call) => {
-                        let (path, description) = transmit::make_pattern(&call, capacity)?;
+                        let (path, description) = transmit::make_pattern(&call, &transmit::pattern_caption(&plan), capacity)?;
                         log(MUTED, description);
                         path
                     }

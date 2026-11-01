@@ -119,7 +119,7 @@ fn run() -> Result<(), String> {
     let capacity = plan.capacity().ok_or("invalid MODCOD and frame size")?;
     let input = match &args.pattern {
         Some(call) => {
-            let (path, description) = transmit::make_pattern(call, capacity)?;
+            let (path, description) = transmit::make_pattern(call, &transmit::pattern_caption(&plan), capacity)?;
             println!("{description}");
             path
         }
