@@ -6,6 +6,12 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- DVB-S2 transmitter, first step: `qoda-tx` modulates an MPEG-TS file into a SigMF IQ recording
+  (QPSK, 8PSK and 16APSK, normal and short frames, with or without pilots), at an integer number
+  of samples per symbol suitable for the ADALM-Pluto. Nothing is transmitted yet; the output is
+  checked with QODA's own receiver, which a loopback test does automatically.
+
 ## [0.1.4] - 2026-10-31
 
 ### Changed

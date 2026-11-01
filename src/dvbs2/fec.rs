@@ -95,26 +95,44 @@ impl Bch {
 
     /// Whether the word (first bit is the highest-degree coefficient) is divisible by g(x).
     pub fn is_codeword(&self, bits: &[u8]) -> bool {
-        // Bit-serial LFSR division: the remainder is kept in the register.
+        // w(x)·x^degree is divisible by g(x) exactly when w(x) is (g has a constant term).
+        self.remainder(bits).iter().all(|&w| w == 0)
+    }
+
+    /// Parity bits of a systematic codeword: the remainder of m(x)·x^degree divided by g(x),
+    /// highest-degree coefficient first. The codeword is `message` followed by these bits.
+    pub fn parity(&self, message: &[u8]) -> Vec<u8> {
+        let reg = self.remainder(message);
+        (0..self.degree).rev().map(|i| ((reg[i / 64] >> (i % 64)) & 1) as u8).collect()
+    }
+
+    /// Bit-serial LFSR division of w(x)·x^degree by g(x); returns the remainder register.
+    fn remainder(&self, bits: &[u8]) -> Vec<u64> {
         let words = self.generator.len();
         let top = self.degree - 1;
         let mut reg = vec![0u64; words];
         for &b in bits {
             let feedback = ((reg[top / 64] >> (top % 64)) & 1) as u8 ^ b;
-            for w in (0..words).rev() {
-                let carry = if w > 0 { reg[w - 1] >> 63 } else { 0 };
-                reg[w] = (reg[w] << 1) | carry;
-            }
-            if self.degree % 64 != 0 {
-                reg[words - 1] &= (1u64 << (self.degree % 64)) - 1;
-            }
+            Self::shift(&mut reg, self.degree);
             if feedback == 1 {
                 for (r, g) in reg.iter_mut().zip(&self.generator) {
                     *r ^= g;
                 }
             }
         }
-        reg.iter().all(|&w| w == 0)
+        reg
+    }
+
+    /// Shifts the register up by one bit, keeping `degree` bits.
+    fn shift(reg: &mut [u64], degree: usize) {
+        let words = reg.len();
+        for w in (0..words).rev() {
+            let carry = if w > 0 { reg[w - 1] >> 63 } else { 0 };
+            reg[w] = (reg[w] << 1) | carry;
+        }
+        if degree % 64 != 0 {
+            reg[words - 1] &= (1u64 << (degree % 64)) - 1;
+        }
     }
 }
 
@@ -155,6 +173,19 @@ mod tests {
         assert!(bch.is_codeword(&word));
         word[100] ^= 1;
         assert!(!bch.is_codeword(&word));
+    }
+
+    #[test]
+    fn bch_parity_makes_codewords() {
+        for (rate, short) in [((1, 2), false), ((2, 3), false), ((3, 4), true)] {
+            let p = FecParams::new(rate, short).unwrap();
+            let bch = p.bch();
+            let mut rng = crate::dvbs2::timing::tests::Lcg(3);
+            let mut word: Vec<u8> = (0..p.k_bch).map(|_| rng.next_bit()).collect();
+            word.extend(bch.parity(&word));
+            assert_eq!(word.len(), p.k_ldpc);
+            assert!(bch.is_codeword(&word), "{rate:?} short={short}");
+        }
     }
 }
 

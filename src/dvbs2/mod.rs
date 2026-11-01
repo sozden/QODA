@@ -1,4 +1,4 @@
-//! DVB-S2 receiver parts (based on ETSI EN 302 307-1).
+//! DVB-S2 receiver and transmitter parts (based on ETSI EN 302 307-1).
 
 pub mod bbframe;
 pub mod fec;
@@ -10,3 +10,4 @@ pub mod plframe;
 pub mod plheader;
 pub mod receiver;
 pub mod timing;
+pub mod tx;
