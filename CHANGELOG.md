@@ -16,6 +16,11 @@ All notable changes to QODA are listed here. The format follows
   the 2401.5–2409.5 MHz uplink band, starts at 30 dB attenuation, limits the time on air and
   switches the transmitter off on Ctrl+C. `--pattern CALLSIGN` makes a test broadcast with
   FFmpeg at the channel's exact bit rate. `qoda-tx` is included in the Windows and Linux packages.
+  First air test on 2026-11-01: TA4SO's test broadcast at 125 kS/s QPSK 1/2 went through QO-100
+  and was decoded by QODA (SNR 4.1 dB).
+- `qoda-tx` moves the signal away from the Pluto's LO (`--shift`), so the LO leakage no longer sits
+  in the middle of the signal; `--level` sets the digital drive; `--loopback` checks the link to
+  the Pluto without transmitting, and the achieved sample rate is shown while sending.
 
 ### Fixed
 - The symbol rate of narrow signals was measured too low (66 kS/s as 58 kS/s): the spectrum is

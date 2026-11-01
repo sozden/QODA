@@ -19,8 +19,9 @@ const MIN_SNR_DB: f32 = 3.0;
 const SMOOTH_HZ: f64 = 10e3;
 /// Regions wider than this are not signals (e.g. the transponder's noise hump).
 const MAX_SYMBOL_RATE: f64 = 5e6;
-/// Peaks narrower than this are not signals (e.g. the DC spike at the receiver's centre).
-const MIN_SYMBOL_RATE: f64 = 20e3;
+/// Peaks narrower than this are not signals (e.g. the DC spike at the receiver's centre, or a
+/// transmitter's LO leakage, which smoothing widens to about 20 kHz). QO-100's lowest common rate is 33 kS/s.
+const MIN_SYMBOL_RATE: f64 = 25e3;
 /// While searching for the floor, a valley is reached if the spectrum does not fall over this width (Hz).
 const VALLEY_PATIENCE_HZ: f64 = 30e3;
 /// Maximum number of signals searched for in a scan.

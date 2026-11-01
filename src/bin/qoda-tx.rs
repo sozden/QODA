@@ -29,6 +29,9 @@ const UPLINK_BAND: (f64, f64) = (2_401.5e6, 2_409.5e6);
 /// RRC-shaped signal reach about 1.7 times (4.6 dB above) the RMS; at -7 dBFS they stay below
 /// full scale. -10.5 dBFS was too weak on the first air test.
 const DEFAULT_LEVEL_DBFS: f64 = -7.0;
+/// The sample rate is at least this many times the shifted signal's outer edge, which keeps it
+/// inside the flat part of the AD9361's analog filter (set to the sample rate).
+const SHIFT_RATE_FACTOR: f64 = 2.5;
 /// Allowed range of `--level`; above -4 dBFS the peaks clip.
 const LEVEL_RANGE_DBFS: (f64, f64) = (-30.0, -4.0);
 const DEFAULT_ATTENUATION_DB: f64 = 30.0;
@@ -51,6 +54,8 @@ struct Args {
     freq: Option<f64>,
     /// Correction added to the transmit frequency for the Pluto's oscillator error (Hz).
     offset: f64,
+    /// Distance of the signal above the transmitter's LO (Hz); `None` picks it from the width.
+    shift: Option<f64>,
     attenuation: f64,
     /// RMS level of the samples sent to the DAC (dBFS).
     level: f64,
@@ -64,6 +69,8 @@ const USAGE: &str = "usage:
   qoda-tx <input.ts | --pattern CALLSIGN> --out <recording> [signal options]
   qoda-tx <input.ts | --pattern CALLSIGN> --pluto <uri> --freq <downlink MHz> [--offset kHz] [--atten dB] [--level dBFS] [--seconds S] [signal options]
 signal options: [--rs kS/s] [--modcod \"QPSK 1/2\"] [--short] [--no-pilots] [--rolloff R] [--sps N]
+--shift kHz: distance of the signal above the transmitter's LO, whose leakage would otherwise sit in the
+  middle of the signal (default 1.5 x half the bandwidth + 50 kHz; 0 turns it off)
 --loopback with --pluto sends the samples at the real rate but only through the chip's digital loopback,
   with the transmitter off: checks that the link keeps up without radiating anything
 --pattern makes a test broadcast (test card, 1 kHz tone, the call sign as service name) at the channel's exact bit rate";
@@ -89,6 +96,7 @@ fn parse_args() -> Result<Args, String> {
         sps: None,
         freq: None,
         offset: 0.0,
+        shift: None,
         attenuation: DEFAULT_ATTENUATION_DB,
         level: DEFAULT_LEVEL_DBFS,
         seconds: DEFAULT_SECONDS,
@@ -110,6 +118,7 @@ fn parse_args() -> Result<Args, String> {
             "--sps" => args.sps = Some(num(it.next(), &a)? as usize),
             "--freq" => args.freq = Some(num(it.next(), &a)? * 1e6),
             "--offset" => args.offset = num(it.next(), &a)? * 1e3,
+            "--shift" => args.shift = Some(num(it.next(), &a)? * 1e3),
             "--atten" => args.attenuation = num(it.next(), &a)?,
             "--level" => args.level = num(it.next(), &a)?,
             "--seconds" => args.seconds = num(it.next(), &a)?,
@@ -147,8 +156,12 @@ fn run() -> Result<(), String> {
     let start = ts.iter().position(|&b| b == 0x47).ok_or("no MPEG-TS sync byte in the input")?;
     let packets: Vec<u8> = ts[start..].chunks_exact(TS_LEN).filter(|p| p[0] == 0x47).flatten().copied().collect();
 
-    // Integer samples per symbol, at least the Pluto's lowest rate.
-    let sps = args.sps.unwrap_or_else(|| (MIN_SAMPLE_RATE / args.symbol_rate).ceil().max(2.0) as usize);
+    // Integer samples per symbol, at least the Pluto's lowest rate, and enough room for the
+    // signal shifted away from the LO when transmitting.
+    let shift = if args.pluto.is_some() { carrier_shift(&args) } else { 0.0 };
+    let half = args.symbol_rate * (1.0 + cfg.rolloff as f64) / 2.0;
+    let min_rate = MIN_SAMPLE_RATE.max(SHIFT_RATE_FACTOR * (shift.abs() + half));
+    let sps = args.sps.unwrap_or_else(|| (min_rate / args.symbol_rate).ceil().max(2.0) as usize);
     let sample_rate = sps as f64 * args.symbol_rate;
     println!(
         "{} TS packets in, {}: TS capacity {:.1} kbit/s at {:.0} kS/s, {} samples/symbol = {:.3} MS/s",
@@ -274,6 +287,16 @@ fn write_recording(path: &std::path::Path, samples: &[Complex<f32>], sample_rate
     Ok(())
 }
 
+/// How far the signal is moved from the transmitter's LO (Hz): the Pluto leaks some of its LO,
+/// which otherwise sits as a carrier in the middle of the signal and costs SNR there. 1.5 times
+/// the signal's half width plus 50 kHz puts it clear of the signal's edge.
+fn carrier_shift(args: &Args) -> f64 {
+    args.shift.unwrap_or_else(|| {
+        let half = args.symbol_rate * (1.0 + args.cfg.rolloff as f64) / 2.0;
+        1.5 * half + 50e3
+    })
+}
+
 /// Sends the samples in a loop until `args.seconds` pass or Ctrl+C is pressed.
 fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) -> Result<(), String> {
     let downlink = args.freq.ok_or("--freq (downlink MHz of the signal's centre) is needed to transmit")?;
@@ -297,12 +320,33 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
     if !(LEVEL_RANGE_DBFS.0..=LEVEL_RANGE_DBFS.1).contains(&args.level) {
         return Err(format!("--level must be between {} and {} dBFS", LEVEL_RANGE_DBFS.0, LEVEL_RANGE_DBFS.1));
     }
-    let tx_hz = uplink + args.offset;
+    // The LO sits `shift` below the signal; its leakage must stay in the band too.
+    let shift = carrier_shift(args);
+    let lo = uplink - shift;
+    if !(UPLINK_BAND.0..=UPLINK_BAND.1).contains(&lo) {
+        return Err(format!(
+            "the transmitter LO ({:.4} MHz, {:.0} kHz below the signal) would fall outside the uplink band; \
+             choose another frequency or a smaller --shift",
+            lo / 1e6,
+            shift / 1e3
+        ));
+    }
+    if shift.abs() + half > sample_rate / 2.0 * 0.8 {
+        return Err(format!("--shift {:.0} kHz does not fit in {:.3} MS/s; use a smaller shift or a larger --sps", shift / 1e3, sample_rate / 1e6));
+    }
+    let tx_hz = lo + args.offset;
 
-    // Scale to the DAC: a fixed RMS level, so the PA drive is set by --level and --atten.
+    // Scale to the DAC: a fixed RMS level, so the PA drive is set by --level and --atten; and
+    // move the signal `shift` up from the LO. Where the loop wraps around the phase jumps once
+    // per pass, which the receiver's carrier tracking rides through.
     let rms = (samples.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / samples.len() as f64).sqrt() as f32;
     let scale = 10f32.powf(args.level as f32 / 20.0) / rms;
-    let scaled: Vec<Complex<f32>> = samples.iter().map(|z| z * scale).collect();
+    let step = std::f64::consts::TAU * shift / sample_rate;
+    let scaled: Vec<Complex<f32>> = samples
+        .iter()
+        .enumerate()
+        .map(|(n, z)| z * scale * Complex::from_polar(1.0, (step * n as f64).rem_euclid(std::f64::consts::TAU) as f32))
+        .collect();
 
     let mut radio = IioTx::open(uri)?;
     radio.set_sample_rate(sample_rate)?;
@@ -318,10 +362,11 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
         radio.set_loopback(0)?;
         println!("*** TRANSMITTING ***  {uri}");
         println!(
-            "    downlink {:.4} MHz, uplink {:.4} MHz (TX LO {:.4} MHz with {:+.1} kHz correction)",
+            "    downlink {:.4} MHz, uplink {:.4} MHz (TX LO {:.4} MHz: {:.0} kHz below the signal, {:+.1} kHz correction)",
             downlink / 1e6,
             uplink / 1e6,
             tx_hz / 1e6,
+            shift / 1e3,
             args.offset / 1e3
         );
         println!("    level {:.1} dBFS, attenuation {:.2} dB, up to {:.0} s; Ctrl+C stops", args.level, args.attenuation, args.seconds);
