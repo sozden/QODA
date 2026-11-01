@@ -25,9 +25,12 @@ const MIN_SAMPLE_RATE: f64 = 2.1e6;
 const UPLINK_OFFSET_HZ: f64 = 8_089.5e6;
 /// The wideband transponder's uplink band (Hz); the whole signal must stay inside it.
 const UPLINK_BAND: (f64, f64) = (2_401.5e6, 2_409.5e6);
-/// RMS level of the samples sent to the DAC (full scale 1). Leaves room for the peaks of the
-/// RRC-shaped signal, which reach about 1.7 times the RMS.
-const TX_RMS: f32 = 0.3;
+/// Default RMS level of the samples sent to the DAC (dB below full scale). The peaks of the
+/// RRC-shaped signal reach about 1.7 times (4.6 dB above) the RMS; at -7 dBFS they stay below
+/// full scale. -10.5 dBFS was too weak on the first air test.
+const DEFAULT_LEVEL_DBFS: f64 = -7.0;
+/// Allowed range of `--level`; above -4 dBFS the peaks clip.
+const LEVEL_RANGE_DBFS: (f64, f64) = (-30.0, -4.0);
 const DEFAULT_ATTENUATION_DB: f64 = 30.0;
 const DEFAULT_SECONDS: f64 = 30.0;
 const MAX_SECONDS: f64 = 600.0;
@@ -49,6 +52,8 @@ struct Args {
     /// Correction added to the transmit frequency for the Pluto's oscillator error (Hz).
     offset: f64,
     attenuation: f64,
+    /// RMS level of the samples sent to the DAC (dBFS).
+    level: f64,
     seconds: f64,
     /// Send the samples through the AD9361's digital loopback with the transmitter off:
     /// measures whether the link keeps up without radiating anything.
@@ -57,7 +62,7 @@ struct Args {
 
 const USAGE: &str = "usage:
   qoda-tx <input.ts | --pattern CALLSIGN> --out <recording> [signal options]
-  qoda-tx <input.ts | --pattern CALLSIGN> --pluto <uri> --freq <downlink MHz> [--offset kHz] [--atten dB] [--seconds S] [signal options]
+  qoda-tx <input.ts | --pattern CALLSIGN> --pluto <uri> --freq <downlink MHz> [--offset kHz] [--atten dB] [--level dBFS] [--seconds S] [signal options]
 signal options: [--rs kS/s] [--modcod \"QPSK 1/2\"] [--short] [--no-pilots] [--rolloff R] [--sps N]
 --loopback with --pluto sends the samples at the real rate but only through the chip's digital loopback,
   with the transmitter off: checks that the link keeps up without radiating anything
@@ -85,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
         freq: None,
         offset: 0.0,
         attenuation: DEFAULT_ATTENUATION_DB,
+        level: DEFAULT_LEVEL_DBFS,
         seconds: DEFAULT_SECONDS,
         loopback: false,
     };
@@ -105,6 +111,7 @@ fn parse_args() -> Result<Args, String> {
             "--freq" => args.freq = Some(num(it.next(), &a)? * 1e6),
             "--offset" => args.offset = num(it.next(), &a)? * 1e3,
             "--atten" => args.attenuation = num(it.next(), &a)?,
+            "--level" => args.level = num(it.next(), &a)?,
             "--seconds" => args.seconds = num(it.next(), &a)?,
             "--loopback" => args.loopback = true,
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}\n{USAGE}")),
@@ -287,11 +294,14 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
     if !(0.0..=MAX_SECONDS).contains(&args.seconds) {
         return Err(format!("--seconds must be between 0 and {MAX_SECONDS}"));
     }
+    if !(LEVEL_RANGE_DBFS.0..=LEVEL_RANGE_DBFS.1).contains(&args.level) {
+        return Err(format!("--level must be between {} and {} dBFS", LEVEL_RANGE_DBFS.0, LEVEL_RANGE_DBFS.1));
+    }
     let tx_hz = uplink + args.offset;
 
-    // Scale to the DAC: a fixed RMS level, so the PA drive is set by --atten alone.
+    // Scale to the DAC: a fixed RMS level, so the PA drive is set by --level and --atten.
     let rms = (samples.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / samples.len() as f64).sqrt() as f32;
-    let scale = TX_RMS / rms;
+    let scale = 10f32.powf(args.level as f32 / 20.0) / rms;
     let scaled: Vec<Complex<f32>> = samples.iter().map(|z| z * scale).collect();
 
     let mut radio = IioTx::open(uri)?;
@@ -314,7 +324,7 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
             tx_hz / 1e6,
             args.offset / 1e3
         );
-        println!("    attenuation {:.2} dB, up to {:.0} s; Ctrl+C stops", args.attenuation, args.seconds);
+        println!("    level {:.1} dBFS, attenuation {:.2} dB, up to {:.0} s; Ctrl+C stops", args.level, args.attenuation, args.seconds);
         radio.set_attenuation(args.attenuation)?;
         radio.power_on()?;
     }
