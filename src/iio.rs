@@ -32,6 +32,7 @@ struct Api {
     buffer_push: unsafe extern "C" fn(Ptr) -> isize,
     debug_attr_write: unsafe extern "C" fn(Ptr, *const c_char, *const c_char) -> isize,
     attr_read: unsafe extern "C" fn(Ptr, *const c_char, *mut c_char, usize) -> isize,
+    device_attr_write: unsafe extern "C" fn(Ptr, *const c_char, *const c_char) -> isize,
     device_attr_read: unsafe extern "C" fn(Ptr, *const c_char, *mut c_char, usize) -> isize,
     // The library must stay open as long as the function pointers are valid.
     _lib: Library,
@@ -77,6 +78,7 @@ impl Api {
                 buffer_push: sym!("iio_buffer_push"),
                 debug_attr_write: sym!("iio_device_debug_attr_write"),
                 attr_read: sym!("iio_channel_attr_read"),
+                device_attr_write: sym!("iio_device_attr_write"),
                 device_attr_read: sym!("iio_device_attr_read"),
                 _lib: lib,
             })
@@ -273,12 +275,22 @@ impl IioTx {
         self.write_attr(self.tx_lo, "frequency", &format!("{}", hz.round() as i64))
     }
 
-    /// Sets the sample rate and opens the analog filter to it. The programmable FIR filter is
-    /// switched off first: a filter left loaded by another program (SDR-Console, for its own rate)
-    /// tilted the signal by 5 dB across 150 kHz on the air. The AD9361 reaches 2.083 MS/s and
-    /// more without it.
+    /// Switches the programmable FIR filters off: a filter left loaded by another program
+    /// (SDR-Console, for its own rate) tilted the signal by 5 dB across 150 kHz on the air. The
+    /// AD9361 reaches 2.083 MS/s and more without it. The Pluto refuses to switch off the transmit
+    /// filter alone (-22), so the receive and transmit filters go off together. Returns an error
+    /// text if the device keeps its filter; transmitting still works then.
+    pub fn disable_fir(&mut self) -> Result<(), String> {
+        let both = unsafe { (self.api.device_attr_write)(self.phy, cstr("in_out_voltage_filter_fir_en").as_ptr(), cstr("0").as_ptr()) };
+        if both >= 0 {
+            return Ok(());
+        }
+        self.write_attr(self.tx_config, "filter_fir_en", "0")
+            .map_err(|e| format!("the FIR filter could not be switched off ({e}; together: error {both})"))
+    }
+
+    /// Sets the sample rate and opens the analog filter to it.
     pub fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
-        self.write_attr(self.tx_config, "filter_fir_en", "0")?;
         self.write_attr(self.tx_config, "sampling_frequency", &format!("{}", rate.round() as i64))?;
         let bandwidth = rate.clamp(200_000.0, 40_000_000.0);
         self.write_attr(self.tx_config, "rf_bandwidth", &format!("{}", bandwidth.round() as i64))

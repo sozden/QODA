@@ -351,6 +351,13 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
         .collect();
 
     let mut radio = IioTx::open(uri)?;
+    // If the device refuses at its current rate, try again from a rate that needs no FIR.
+    if radio.disable_fir().is_err() {
+        radio.set_sample_rate(4e6)?;
+        if let Err(e) = radio.disable_fir() {
+            println!("WARNING: {e}; the signal may come out tilted.");
+        }
+    }
     radio.set_sample_rate(sample_rate)?;
     radio.set_frequency(tx_hz)?;
     install_stop_handler();
