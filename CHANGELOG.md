@@ -22,6 +22,13 @@ All notable changes to QODA are listed here. The format follows
   in the middle of the signal; `--level` sets the digital drive; `--loopback` checks the link to
   the Pluto without transmitting, and the achieved sample rate is shown while sending.
 
+- QODA TX (`qoda-tx-gui`), a window for the transmitter in the same look as QODA: downlink
+  frequency tuner with uplink, Pluto LO, bandwidth and TS capacity; source (test broadcast with
+  the call sign, or a TS file, also by drag and drop); symbol rate, MODCOD, frame and roll-off;
+  level, attenuation, time limit and frequency correction; a TRANSMIT / STOP button, a link test
+  through the digital loopback, an ON AIR banner with time and achieved sample rate, and a log.
+  English and Turkish; settings are kept in `tx-settings.txt` next to QODA's settings. The
+  transmit logic moved to `qoda::transmit`, shared with `qoda-tx`.
 - Automatic frequency correction while watching: when the decoder measures the carrier more than
   1.5% of the symbol rate (at least 1 kHz) off the selected frequency, QODA moves the selection
   onto it and restarts the decoder.

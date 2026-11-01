@@ -18,13 +18,14 @@ root="$dist/linux/root"
 install -Dm755 target/release/qoda "$root/usr/bin/qoda"
 install -Dm755 target/release/qoda-analyze "$root/usr/bin/qoda-analyze"
 install -Dm755 target/release/qoda-tx "$root/usr/bin/qoda-tx"
+install -Dm755 target/release/qoda-tx-gui "$root/usr/bin/qoda-tx-gui"
 install -Dm644 tools/linux/qoda.desktop "$root/usr/share/applications/qoda.desktop"
 install -Dm644 assets/qoda-logo.svg "$root/usr/share/icons/hicolor/scalable/apps/qoda.svg"
 install -Dm644 tools/linux/60-qoda-sdr.rules "$root/usr/lib/udev/rules.d/60-qoda-sdr.rules"
 install -Dm644 README.md "$root/usr/share/doc/qoda/README.md"
 install -Dm644 CHANGELOG.md "$root/usr/share/doc/qoda/CHANGELOG.md"
 install -Dm644 LICENSE "$root/usr/share/doc/qoda/copyright"
-strip "$root/usr/bin/qoda" "$root/usr/bin/qoda-analyze" "$root/usr/bin/qoda-tx"
+strip "$root/usr/bin/qoda" "$root/usr/bin/qoda-analyze" "$root/usr/bin/qoda-tx" "$root/usr/bin/qoda-tx-gui"
 
 # .deb: shared library dependencies come from dpkg-shlibdeps; libraries that are loaded at run time
 # (window system, libiio, SoapySDR modules, FFmpeg) are listed by hand.
@@ -32,7 +33,7 @@ deb="$dist/linux/deb"
 cp -a "$root" "$deb"
 mkdir -p "$dist/linux/shlib/debian"
 touch "$dist/linux/shlib/debian/control"
-shlibs=$(cd "$dist/linux/shlib" && dpkg-shlibdeps -O "../deb/usr/bin/qoda" "../deb/usr/bin/qoda-analyze" "../deb/usr/bin/qoda-tx" 2>/dev/null \
+shlibs=$(cd "$dist/linux/shlib" && dpkg-shlibdeps -O "../deb/usr/bin/qoda" "../deb/usr/bin/qoda-analyze" "../deb/usr/bin/qoda-tx" "../deb/usr/bin/qoda-tx-gui" 2>/dev/null \
     | sed -n 's/^shlibs:Depends=//p')
 size=$(du -sk "$deb/usr" | cut -f1)
 mkdir -p "$deb/DEBIAN"
@@ -69,7 +70,7 @@ dpkg-deb --root-owner-group --build "$deb" "$dist/qoda_${version}_amd64.deb"
 name="QODA-$version-linux-x86_64"
 tree="$dist/linux/$name"
 mkdir -p "$tree"
-cp "$root/usr/bin/qoda" "$root/usr/bin/qoda-analyze" "$root/usr/bin/qoda-tx" tools/linux/qoda.desktop \
+cp "$root/usr/bin/qoda" "$root/usr/bin/qoda-analyze" "$root/usr/bin/qoda-tx" "$root/usr/bin/qoda-tx-gui" tools/linux/qoda.desktop \
     tools/linux/60-qoda-sdr.rules assets/qoda-logo.svg README.md CHANGELOG.md LICENSE "$tree/"
 cat > "$tree/INSTALL.txt" <<'EOF'
 QODA for Linux (x86_64)

@@ -38,6 +38,7 @@ jobs:
             target/release/qoda
             target/release/qoda-analyze
             target/release/qoda-tx
+            target/release/qoda-tx-gui
       - name: Linux packages
         run: bash tools/linux/package.sh
       - name: Upload packages
@@ -78,3 +79,4 @@ jobs:
             target/release/qoda
             target/release/qoda-analyze
             target/release/qoda-tx
+            target/release/qoda-tx-gui

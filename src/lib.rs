@@ -8,5 +8,7 @@ pub mod dvbs2;
 pub mod ffmpeg;
 pub mod iio;
 pub mod sigmf;
+pub mod transmit;
 pub mod tsinfo;
 pub mod tuning;
+pub mod ui;

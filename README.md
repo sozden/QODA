@@ -115,6 +115,8 @@ qoda-analyze recordings/<name>
 
 `qoda-tx` is a DVB-S2 modulator for licensed radio amateurs. It turns an MPEG-TS file, or a test broadcast it makes with FFmpeg, into DVB-S2 and either writes a SigMF recording or transmits it on the QO-100 wideband uplink with an ADALM-Pluto.
 
+**QODA TX** (`qoda-tx-gui`) does the same in a window: enter the Pluto's address and your call sign, pick the downlink frequency, symbol rate and MODCOD, check the link with **Link test** (nothing is radiated) and press **TRANSMIT**. The command line tool below offers the same and a few more options.
+
 Check the signal without transmitting; QODA's own decoder reads it back:
 
 ```bash
@@ -270,6 +272,8 @@ qoda-analyze recordings/<ad>
 ### Yayın yapma (deneysel)
 
 `qoda-tx`, lisanslı radyo amatörleri için bir DVB-S2 modülatörüdür. Bir MPEG-TS dosyasını ya da FFmpeg ile kendi ürettiği test yayınını DVB-S2'ye çevirir; SigMF kaydı olarak yazar ya da ADALM-Pluto ile QO-100 geniş bant uplink'inde yayınlar.
+
+**QODA TX** (`qoda-tx-gui`) aynı işi bir pencerede yapar: Pluto'nun adresini ve çağrı işaretinizi girin, downlink frekansını, sembol hızını ve MODCOD'u seçin, **Bağlantı testi** ile bağlantıyı sınayın (hiçbir şey yayılmaz) ve **YAYINLA**'ya basın. Aşağıdaki komut satırı aracı aynı işlevleri ve birkaç ek seçeneği sunar.
 
 Sinyali yayın yapmadan kontrol edin; QODA'nın kendi çözücüsü geri okur:
 
