@@ -200,8 +200,10 @@ fn make_pattern(call: &str, capacity: f64) -> Result<PathBuf, String> {
     for _ in 0..5 {
         run_ffmpeg_pattern(&ffmpeg, call, capacity, video as u32, mux, &path)?;
         let bytes = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        // A file that fits is padded to the mux rate, but FFmpeg runs slightly past the
+        // duration, so it measures up to ~1% above the mux rate; a real overflow is far more.
         let actual = bytes as f64 * 8.0 / PATTERN_SECONDS as f64 / 1000.0;
-        if actual <= mux as f64 * 1.005 {
+        if actual <= capacity / 1000.0 * 1.02 {
             let sound = if capacity < LOW_RATE { "no audio" } else { "MP2 32 kbit/s" };
             println!("Test broadcast \"{call}\": H.264 {video:.0} kbit/s + {sound}, muxed at {mux} kbit/s");
             return Ok(path);
