@@ -45,6 +45,9 @@ All notable changes to QODA are listed here. The format follows
   estimate was taken as absolute although it is only unambiguous within ±π/24 rad/symbol (±2.6 kHz
   at 125 kS/s); it now corrects the current estimate, and single outlying measurements are limited.
   Found with an IQ recording of the first QODA-to-QODA transmission through QO-100.
+- With the 3 dB detection limit, the transponder noise seen through the receiver's own passband
+  (a plateau ~0.77 of the sample rate wide in the middle of the spectrum) showed up as a
+  ~1800 kS/s "signal" in the signals strip. Such a plateau is now ignored.
 - `qoda-analyze`: with both `--freq` and `--rs` given, the frequency is used as the exact centre.
 - The symbol rate of narrow signals was measured too low (66 kS/s as 58 kS/s): the spectrum is
   now smoothed over linear power instead of dB.

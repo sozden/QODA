@@ -24,6 +24,9 @@ const MAX_SYMBOL_RATE: f64 = 5e6;
 const MIN_SYMBOL_RATE: f64 = 25e3;
 /// While searching for the floor, a valley is reached if the spectrum does not fall over this width (Hz).
 const VALLEY_PATIENCE_HZ: f64 = 30e3;
+/// A plateau centred in the spectrum and wider than this share of the sample rate is the
+/// receiver's passband over the transponder noise, not a signal.
+const PASSBAND_SHARE: f64 = 0.72;
 /// Maximum number of signals searched for in a scan.
 const MAX_SIGNALS: usize = 32;
 
@@ -157,6 +160,14 @@ fn detect_smoothed(s: &[f32], bin_hz: f64, guess: usize) -> Option<(Detection, (
     (left, right) = edges(s, guess, half);
     let measured = (right - left) * bin_hz;
     if !(MIN_SYMBOL_RATE..=MAX_SYMBOL_RATE).contains(&measured) || right - left < 3.0 {
+        return None;
+    }
+    // The receiver's own passband over the transponder's noise: inside the transponder the noise
+    // stands above the receiver's filter skirts as a sharp-edged plateau in the middle of the
+    // spectrum, about 0.77 of the sample rate wide (seen 3–4 dB high with 2.4 MS/s). No signal
+    // one would watch fills that much of the window.
+    let centre = (left + right) / 2.0 - n as f64 / 2.0;
+    if (right - left) > PASSBAND_SHARE * n as f64 && centre.abs() < 0.05 * n as f64 {
         return None;
     }
     let (fl, fr) = edges(s, guess, floor + 3.0_f32.min(snr / 2.0));
@@ -307,6 +318,20 @@ mod tests {
         let d = detect(&db, fs, n / 2 + 307).expect("signal should be found");
         assert!((d.measured_symbol_rate - 500e3).abs() < 15e3, "{d:?}");
         assert_eq!(d.common_symbol_rate, Some(500e3), "{d:?}");
+    }
+
+    /// The transponder noise through a 2.4 MS/s receiver: a 3.5 dB plateau 0.78 of the window wide.
+    #[test]
+    fn ignores_receiver_passband_over_transponder_noise() {
+        let (n, fs) = (4096, 2.4e6);
+        let db: Vec<f32> = (0..n)
+            .map(|i| {
+                let f = ((i as f64 + 0.5) / n as f64 - 0.5) * fs;
+                if f.abs() < 0.39 * fs { -60.0 + 3.5 } else { -60.0 }
+            })
+            .collect();
+        assert_eq!(detect(&db, fs, n / 2), None);
+        assert!(scan(&db, fs).is_empty());
     }
 
     #[test]
