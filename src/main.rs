@@ -5,7 +5,6 @@
 mod app;
 mod decoder;
 mod i18n;
-mod iio;
 mod logo;
 mod sdr;
 mod settings;
@@ -51,7 +50,7 @@ fn diagnose() {
     for d in devices {
         println!("  {:?} | {} | {}", d.kind, d.label, d.args);
     }
-    println!("libiio: {:?}", iio::library_status());
+    println!("libiio: {:?}", qoda::iio::library_status());
     for tool in ["ffmpeg", "ffplay"] {
         println!("{tool}: {:?}", decoder::find_ffmpeg_tool(tool));
     }

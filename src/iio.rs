@@ -1,4 +1,4 @@
-//! AD9361-based receivers over libiio (ADALM-Pluto, LibreSDR).
+//! AD9361-based radios over libiio (ADALM-Pluto, LibreSDR): receiving and transmitting.
 //!
 //! libiio is loaded at run time: if it is not installed the program still starts
 //! and only these devices are unavailable. The libiio 0.x C API is used (on Windows
@@ -29,6 +29,7 @@ struct Api {
     buffer_start: unsafe extern "C" fn(Ptr) -> *const c_void,
     buffer_end: unsafe extern "C" fn(Ptr) -> *const c_void,
     buffer_destroy: unsafe extern "C" fn(Ptr),
+    buffer_push: unsafe extern "C" fn(Ptr) -> isize,
     // The library must stay open as long as the function pointers are valid.
     _lib: Library,
 }
@@ -70,6 +71,7 @@ impl Api {
                 buffer_start: sym!("iio_buffer_start"),
                 buffer_end: sym!("iio_buffer_end"),
                 buffer_destroy: sym!("iio_buffer_destroy"),
+                buffer_push: sym!("iio_buffer_push"),
                 _lib: lib,
             })
         }
@@ -200,11 +202,129 @@ impl Drop for IioRadio {
     }
 }
 
+/// Samples written per transfer when transmitting.
+const TX_BUFFER_SAMPLES: usize = 65_536;
+/// Highest TX attenuation of the AD9361 (dB).
+pub const MAX_TX_ATTENUATION: f64 = 89.75;
+
+/// An open AD9361 transmitter. The output is switched off (TX LO powered down) when dropped.
+pub struct IioTx {
+    api: Api,
+    context: Ptr,
+    /// The transmit settings channel of ad9361-phy (sample rate, bandwidth, attenuation).
+    tx_config: Ptr,
+    /// The TX_LO channel of ad9361-phy.
+    tx_lo: Ptr,
+    buffer: Ptr,
+}
+
+unsafe impl Send for IioTx {}
+
+impl IioTx {
+    /// Opens the transmitter with the output off; `set_*` then `power_on` before `write`.
+    pub fn open(uri: &str) -> Result<Self, String> {
+        let api = Api::load()?;
+        unsafe {
+            let context = (api.create_context)(cstr(uri).as_ptr());
+            if context.is_null() {
+                return Err(format!("could not connect to {uri}"));
+            }
+            let find = |dev: &str| (api.find_device)(context, cstr(dev).as_ptr());
+            let (phy, tx) = (find("ad9361-phy"), find("cf-ad9361-dds-core-lpc"));
+            if phy.is_null() || tx.is_null() {
+                (api.context_destroy)(context);
+                return Err(format!("{uri} is not an AD9361 transmitter"));
+            }
+            let channel = |dev, name: &str, output| (api.find_channel)(dev, cstr(name).as_ptr(), output);
+            let tx_config = channel(phy, "voltage0", true);
+            let tx_lo = channel(phy, "altvoltage1", true);
+            let (i, q) = (channel(tx, "voltage0", true), channel(tx, "voltage1", true));
+            if [tx_config, tx_lo, i, q].iter().any(|c| c.is_null()) {
+                (api.context_destroy)(context);
+                return Err(format!("{uri}: transmitter channels not found"));
+            }
+            let mut radio = Self { api, context, tx_config, tx_lo, buffer: std::ptr::null_mut() };
+            // Off and fully attenuated until the caller has set everything up.
+            radio.write_attr(tx_lo, "powerdown", "1")?;
+            radio.set_attenuation(MAX_TX_ATTENUATION)?;
+            (radio.api.channel_enable)(i);
+            (radio.api.channel_enable)(q);
+            radio.buffer = (radio.api.create_buffer)(tx, TX_BUFFER_SAMPLES, false);
+            if radio.buffer.is_null() {
+                return Err(format!("{uri}: could not create the transmit buffer"));
+            }
+            Ok(radio)
+        }
+    }
+
+    fn write_attr(&self, channel: Ptr, attr: &str, value: &str) -> Result<(), String> {
+        let n = unsafe { (self.api.attr_write)(channel, cstr(attr).as_ptr(), cstr(value).as_ptr()) };
+        if n < 0 { Err(format!("{attr}={value}: error {n}")) } else { Ok(()) }
+    }
+
+    pub fn set_frequency(&mut self, hz: f64) -> Result<(), String> {
+        self.write_attr(self.tx_lo, "frequency", &format!("{}", hz.round() as i64))
+    }
+
+    /// Sets the sample rate and opens the analog filter to it.
+    pub fn set_sample_rate(&mut self, rate: f64) -> Result<(), String> {
+        self.write_attr(self.tx_config, "sampling_frequency", &format!("{}", rate.round() as i64))?;
+        let bandwidth = rate.clamp(200_000.0, 40_000_000.0);
+        self.write_attr(self.tx_config, "rf_bandwidth", &format!("{}", bandwidth.round() as i64))
+    }
+
+    /// Output attenuation in dB, 0 (full power) to `MAX_TX_ATTENUATION`, in 0.25 dB steps.
+    pub fn set_attenuation(&mut self, db: f64) -> Result<(), String> {
+        let db = (db.clamp(0.0, MAX_TX_ATTENUATION) * 4.0).round() / 4.0;
+        self.write_attr(self.tx_config, "hardwaregain", &format!("{:.2}", -db))
+    }
+
+    /// Switches the transmitter's local oscillator on (the output stays silent until samples arrive).
+    pub fn power_on(&mut self) -> Result<(), String> {
+        self.write_attr(self.tx_lo, "powerdown", "0")
+    }
+
+    /// Number of samples one `write` call takes.
+    pub fn buffer_samples(&self) -> usize {
+        TX_BUFFER_SAMPLES
+    }
+
+    /// Sends `buffer_samples()` samples (shorter input is padded with silence); blocks until the
+    /// device has room, which paces the caller to the sample rate. Samples should stay within ±1.
+    pub fn write(&mut self, samples: &[Complex<f32>]) -> Result<(), String> {
+        unsafe {
+            let start = (self.api.buffer_start)(self.buffer) as *mut i16;
+            let end = (self.api.buffer_end)(self.buffer) as *const i16;
+            let raw = std::slice::from_raw_parts_mut(start, end.offset_from(start) as usize);
+            // I and Q interleaved, signed 16-bit; the 12-bit DAC takes the upper bits.
+            for (iq, z) in raw.chunks_exact_mut(2).zip(samples.iter().chain(std::iter::repeat(&Complex::default()))) {
+                iq[0] = (z.re.clamp(-1.0, 1.0) * 32_767.0) as i16;
+                iq[1] = (z.im.clamp(-1.0, 1.0) * 32_767.0) as i16;
+            }
+            let n = (self.api.buffer_push)(self.buffer);
+            if n < 0 { Err(format!("sample write failed: error {n}")) } else { Ok(()) }
+        }
+    }
+}
+
+impl Drop for IioTx {
+    fn drop(&mut self) {
+        let _ = self.set_attenuation(MAX_TX_ATTENUATION);
+        let _ = self.write_attr(self.tx_lo, "powerdown", "1");
+        unsafe {
+            if !self.buffer.is_null() {
+                (self.api.buffer_destroy)(self.buffer);
+            }
+            (self.api.context_destroy)(self.context);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Test with a real device: `QODA_IIO_URI=ip:192.168.2.1 cargo test --bin qoda iio -- --ignored`
+    /// Test with a real device: `QODA_IIO_URI=ip:192.168.2.1 cargo test --lib iio -- --ignored`
     #[test]
     #[ignore]
     fn reads_samples_from_device() {

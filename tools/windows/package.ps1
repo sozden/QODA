@@ -74,7 +74,7 @@ function Copy-Required([string]$from, [string]$to) {
     if (-not (Test-Path $from)) { throw "missing: $from" }
     Copy-Item $from $to
 }
-foreach ($f in 'qoda.exe', 'qoda-analyze.exe') { Copy-Required "target\release\$f" $stage }
+foreach ($f in 'qoda.exe', 'qoda-analyze.exe', 'qoda-tx.exe') { Copy-Required "target\release\$f" $stage }
 $pothosBin = Join-Path $PothosDir 'bin'
 foreach ($f in 'SoapySDR.dll', 'hackrf.dll', 'libusb-1.0.dll', 'libiio.dll', 'MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll') {
     Copy-Required (Join-Path $pothosBin $f) $stage

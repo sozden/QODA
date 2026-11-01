@@ -16,7 +16,7 @@ use soapysdr::Direction::Rx;
 
 use qoda::dsp::Spectrum;
 
-use crate::iio::IioRadio;
+use qoda::iio::IioRadio;
 
 /// Approximate number of spectrum frames produced per second.
 const FRAMES_PER_SECOND: f64 = 25.0;

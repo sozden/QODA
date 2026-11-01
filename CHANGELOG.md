@@ -11,6 +11,15 @@ All notable changes to QODA are listed here. The format follows
   (QPSK, 8PSK and 16APSK, normal and short frames, with or without pilots), at an integer number
   of samples per symbol suitable for the ADALM-Pluto. Nothing is transmitted yet; the output is
   checked with QODA's own receiver, which a loopback test does automatically.
+- Transmitting with an ADALM-Pluto (experimental): `qoda-tx --pluto <uri> --freq <downlink MHz>`
+  sends the signal on the QO-100 wideband uplink. It refuses frequencies whose signal would leave
+  the 2401.5–2409.5 MHz uplink band, starts at 30 dB attenuation, limits the time on air and
+  switches the transmitter off on Ctrl+C. `--pattern CALLSIGN` makes a test broadcast with
+  FFmpeg at the channel's exact bit rate. `qoda-tx` is included in the Windows and Linux packages.
+
+### Fixed
+- The symbol rate of narrow signals was measured too low (66 kS/s as 58 kS/s): the spectrum is
+  now smoothed over linear power instead of dB.
 
 ## [0.1.4] - 2026-10-31
 

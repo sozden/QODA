@@ -111,6 +111,29 @@ qoda-analyze recordings/<name>
 
 `--scan` lists every broadcast in the recording; `--freq MHz` picks one that is not at the center. It prints the detected parameters, every frame header, the error-correction results and the service information, and writes the transport stream next to the recording as a `.ts` file. Options: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (decode with the same streaming receiver as the live view) and `--noise dB` (add white noise to test weak-signal reception).
 
+## Transmitting (experimental)
+
+`qoda-tx` is a DVB-S2 modulator for licensed radio amateurs. It turns an MPEG-TS file, or a test broadcast it makes with FFmpeg, into DVB-S2 and either writes a SigMF recording or transmits it on the QO-100 wideband uplink with an ADALM-Pluto.
+
+Check the signal without transmitting; QODA's own decoder reads it back:
+
+```bash
+qoda-tx --pattern <CALLSIGN> --out test --rs 333 --modcod "QPSK 1/2"
+qoda-analyze test --stream
+```
+
+Transmit (the downlink frequency of the signal's centre is given, the uplink is derived from it):
+
+```bash
+qoda-tx --pattern <CALLSIGN> --pluto ip:192.168.2.1 --freq 10497.75 --rs 333 --modcod "QPSK 1/2" --atten 30 --seconds 30
+```
+
+- `--pattern CALLSIGN` makes a 20 s test card with a 1 kHz tone and the call sign as the service name, muxed at the channel's exact bit rate; it repeats while transmitting. Or give a `.ts` file instead.
+- The whole signal must lie inside the uplink band, 2401.5–2409.5 MHz; otherwise `qoda-tx` refuses.
+- `--atten dB` is the Pluto's output attenuation (default 30 dB, 0–89.75). Start high, watch your own signal on the downlink with QODA and lower it step by step; keep the signal below the beacon and the PA out of compression.
+- `--offset kHz` corrects the Pluto's oscillator error, `--seconds S` limits the time on air (default 30, at most 600). Ctrl+C switches the transmitter off.
+- Other options: `--short`, `--no-pilots`, `--rolloff R`, `--sps N`.
+
 ## How it works
 
 ```
@@ -239,6 +262,29 @@ qoda-analyze recordings/<ad>
 ```
 
 `--scan` kayıttaki bütün yayınları listeler; `--freq MHz` ortada olmayan bir yayını seçer. Tespit edilen parametreleri, her çerçeve başlığını, hata düzeltme sonuçlarını ve servis bilgisini yazdırır, taşıma akışını kaydın yanına `.ts` dosyası olarak yazar. Seçenekler: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (canlı görünümdekiyle aynı akış alıcısıyla çöz) ve `--noise dB` (zayıf sinyal alımını sınamak için beyaz gürültü ekle).
+
+### Yayın yapma (deneysel)
+
+`qoda-tx`, lisanslı radyo amatörleri için bir DVB-S2 modülatörüdür. Bir MPEG-TS dosyasını ya da FFmpeg ile kendi ürettiği test yayınını DVB-S2'ye çevirir; SigMF kaydı olarak yazar ya da ADALM-Pluto ile QO-100 geniş bant uplink'inde yayınlar.
+
+Sinyali yayın yapmadan kontrol edin; QODA'nın kendi çözücüsü geri okur:
+
+```bash
+qoda-tx --pattern <ÇAĞRI-İŞARETİ> --out test --rs 333 --modcod "QPSK 1/2"
+qoda-analyze test --stream
+```
+
+Yayın (sinyal merkezinin downlink frekansı verilir, uplink ondan hesaplanır):
+
+```bash
+qoda-tx --pattern <ÇAĞRI-İŞARETİ> --pluto ip:192.168.2.1 --freq 10497.75 --rs 333 --modcod "QPSK 1/2" --atten 30 --seconds 30
+```
+
+- `--pattern ÇAĞRI-İŞARETİ` 1 kHz tonlu, servis adı çağrı işareti olan 20 saniyelik bir test kartı üretir; kanalın tam bit hızında paketlenir ve yayın boyunca tekrarlanır. Onun yerine bir `.ts` dosyası da verilebilir.
+- Sinyalin tamamı 2401,5–2409,5 MHz uplink bandının içinde olmalıdır; değilse `qoda-tx` yayını reddeder.
+- `--atten dB` Pluto'nun çıkış zayıflatmasıdır (varsayılan 30 dB, 0–89,75). Yüksekten başlayın, kendi sinyalinizi QODA ile downlink'te izleyerek adım adım düşürün; sinyal beacondan zayıf kalsın, amplifikatör doyuma girmesin.
+- `--offset kHz` Pluto'nun osilatör hatasını düzeltir, `--seconds S` yayın süresini sınırlar (varsayılan 30, en fazla 600). Ctrl+C vericiyi kapatır.
+- Diğer seçenekler: `--short`, `--no-pilots`, `--rolloff R`, `--sps N`.
 
 ### Nasıl çalışır
 

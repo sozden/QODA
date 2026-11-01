@@ -231,12 +231,15 @@ fn walk(s: &[f32], start: usize, inside: impl Fn(f32) -> bool) -> (usize, usize)
     (l, r)
 }
 
+/// Moving average of a dB spectrum, taken over linear power. Averaging the dB values themselves
+/// lets the deep floor pull a narrow signal's edges inwards (a 66 kS/s signal measured 58 kS/s).
 fn moving_average(v: &[f32], half_width: usize) -> Vec<f32> {
+    let lin: Vec<f64> = v.iter().map(|&db| 10f64.powf(db as f64 / 10.0)).collect();
     (0..v.len())
         .map(|i| {
             let a = i.saturating_sub(half_width);
             let b = (i + half_width + 1).min(v.len());
-            v[a..b].iter().sum::<f32>() / (b - a) as f32
+            (10.0 * (lin[a..b].iter().sum::<f64>() / (b - a) as f64).log10()) as f32
         })
         .collect()
 }

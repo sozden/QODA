@@ -37,6 +37,7 @@ jobs:
           path: |
             target/release/qoda
             target/release/qoda-analyze
+            target/release/qoda-tx
       - name: Linux packages
         run: bash tools/linux/package.sh
       - name: Upload packages
@@ -76,3 +77,4 @@ jobs:
           path: |
             target/release/qoda
             target/release/qoda-analyze
+            target/release/qoda-tx
