@@ -156,7 +156,11 @@ impl TxApp {
         self.save_settings();
         let plan = self.plan();
         let air = self.air(loopback);
-        let uri = self.uri.trim().to_string();
+        // A bare address means the network: "192.168.2.1" → "ip:192.168.2.1".
+        let uri = match self.uri.trim() {
+            u if u.contains(':') => u.to_string(),
+            u => format!("ip:{u}"),
+        };
         let source = match self.source {
             Source::Pattern => Err(self.call.trim().to_uppercase()),
             Source::File => Ok(PathBuf::from(self.file.trim())),
@@ -419,8 +423,8 @@ impl TxApp {
             });
             ui.add_space(6.0);
             egui::Grid::new("derived").num_columns(4).spacing([10.0, 8.0]).show(ui, |ui| {
-                metric(ui, self.tr("Uplink", "Uplink"), &format!("{:.4} MHz", plan.uplink_hz() / 1e6), ACCENT);
-                metric(ui, self.tr("Pluto LO", "Pluto osilatörü"), &format!("{:.4} MHz", plan.lo_hz() / 1e6), TEXT);
+                metric(ui, self.tr("Uplink (MHz)", "Uplink (MHz)"), &format!("{:.4}", plan.uplink_hz() / 1e6), ACCENT);
+                metric(ui, self.tr("Pluto LO (MHz)", "Pluto osilatörü (MHz)"), &format!("{:.4}", plan.lo_hz() / 1e6), TEXT);
                 metric(ui, self.tr("Bandwidth", "Bant genişliği"), &format!("{:.0} kHz", plan.half_width() * 2.0 / 1e3), TEXT);
                 metric(ui, self.tr("TS capacity", "TS kapasitesi"), &plan.capacity().map_or("—".into(), |c| format!("{:.1} kbit/s", c / 1e3)), TEXT);
                 ui.end_row();
@@ -437,7 +441,7 @@ impl TxApp {
                     self.stop();
                 }
             } else {
-                let button = egui::Button::new(RichText::new(self.tr("●  TRANSMIT", "●  YAYINLA")).size(22.0).strong().color(Color32::WHITE))
+                let button = egui::Button::new(RichText::new(self.tr("▶  TRANSMIT", "▶  YAYINLA")).size(22.0).strong().color(Color32::WHITE))
                     .fill(BAD.gamma_multiply(0.85))
                     .min_size(vec2(260.0, 64.0))
                     .corner_radius(10);
