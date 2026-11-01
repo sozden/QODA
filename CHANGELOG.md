@@ -22,7 +22,17 @@ All notable changes to QODA are listed here. The format follows
   in the middle of the signal; `--level` sets the digital drive; `--loopback` checks the link to
   the Pluto without transmitting, and the achieved sample rate is shown while sending.
 
+- Automatic frequency correction while watching: when the decoder measures the carrier more than
+  1.5% of the symbol rate (at least 1 kHz) off the selected frequency, QODA moves the selection
+  onto it and restarts the decoder.
+
 ### Fixed
+- Weak signals at low symbol rates were decoded with a wrong MODCOD (e.g. QPSK 2/5 instead of 1/2)
+  and lost every frame when the tuning was a few kHz off (since 0.1.2). The pilot-based frequency
+  estimate was taken as absolute although it is only unambiguous within ±π/24 rad/symbol (±2.6 kHz
+  at 125 kS/s); it now corrects the current estimate, and single outlying measurements are limited.
+  Found with an IQ recording of the first QODA-to-QODA transmission through QO-100.
+- `qoda-analyze`: with both `--freq` and `--rs` given, the frequency is used as the exact centre.
 - The symbol rate of narrow signals was measured too low (66 kS/s as 58 kS/s): the spectrum is
   now smoothed over linear power instead of dB.
 

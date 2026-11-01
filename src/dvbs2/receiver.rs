@@ -52,9 +52,12 @@ const MIN_PLS_MARGIN: f32 = 0.3;
 const MIN_LOCKED_SOF: f32 = 0.8;
 /// Weight of the PLL frequency in the common estimate at the end of each frame.
 const FREQ_TRACKING: f32 = 0.5;
-/// Weight of the previous frames in the accumulated pilot frequency measurement (about
-/// 1 / (1 - x) frames are averaged).
-const PILOT_FREQ_MEMORY: f32 = 0.85;
+/// Share of each frame's pilot frequency error applied to the common estimate on weak signals:
+/// averages the noisy per-frame measurement over about 1 / x frames.
+const PILOT_FREQ_GAIN: f32 = 0.2;
+/// Largest per-frame pilot frequency error taken into account (radians/symbol), about twice the
+/// measurement's spread at 1 dB SNR.
+const MAX_PILOT_FREQ_ERROR: f32 = 0.006;
 
 pub struct ReceiverConfig {
     pub sample_rate: f64,
@@ -161,8 +164,6 @@ pub struct Receiver {
     /// Common frequency offset (radians/symbol). Set from the header at first lock, then
     /// updated from the PLL frequency at the end of every frame.
     freq: Option<f32>,
-    /// Pilot frequency measurement accumulated over frames (see `plframe::Demapped::pilot_corr`).
-    pilot_corr: Complex<f32>,
     /// LDPC results of the last frames as bits (1 = decoded), newest lowest.
     recent: u32,
     fec: Option<Arc<FecState>>,
@@ -201,7 +202,6 @@ impl Receiver {
             last_frame_len: 0,
             misses: 0,
             freq: None,
-            pilot_corr: Complex::default(),
             recent: 0,
             fec: None,
             jobs,
@@ -455,11 +455,19 @@ impl Receiver {
         // The PLL's frequency at the end of the body is much better than a single header's estimate.
         // It is used without waiting for the LDPC result; otherwise, while the first estimate is wrong,
         // the following headers are decoded with the same error.
-        self.pilot_corr = self.pilot_corr * PILOT_FREQ_MEMORY + demapped.pilot_corr;
         if let Some(f) = &mut self.freq {
             if demapped.pilot_aided {
-                // Weak signal: the loop did not run; the frequency comes from the pilots of the last frames.
-                *f = self.pilot_corr.arg() / plframe::PILOT_FREQ_LAG as f32;
+                // Weak signal: the loop did not run; the pilots measure the error of the current
+                // estimate. Only the error is unambiguous within ±π/PILOT_FREQ_LAG rad/symbol
+                // (±2.6 kHz at 125 kS/s); taken as an absolute frequency it aliased whenever the
+                // tuning was a few kHz off, and the headers were then read with a wrong MODCOD.
+                let lag = plframe::PILOT_FREQ_LAG as f32;
+                let error = (demapped.pilot_corr * Complex::from_polar(1.0, -*f * lag)).arg() / lag;
+                // A single bad measurement (ten times the usual spread was seen on air) must not
+                // throw the estimate out of the narrow range the pilot interpolation needs.
+                if demapped.pilot_corr.norm_sqr() > 0.0 {
+                    *f += PILOT_FREQ_GAIN * error.clamp(-MAX_PILOT_FREQ_ERROR, MAX_PILOT_FREQ_ERROR);
+                }
             } else {
                 *f += FREQ_TRACKING * (demapped.final_freq - *f);
             }

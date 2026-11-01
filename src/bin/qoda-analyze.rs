@@ -116,9 +116,14 @@ fn run() -> Result<(), String> {
         }
         None => n / 2,
     };
-    let found = detect::detect(&db, fs, guess).ok_or("no broadcast found at the selected frequency")?;
+    let mut found = detect::detect(&db, fs, guess).ok_or("no broadcast found at the selected frequency")?;
     let rs = args.symbol_rate.unwrap_or(found.symbol_rate());
     let rolloff = args.rolloff.unwrap_or(nearest_rolloff(found.rolloff));
+    // With both the frequency and the symbol rate given, the frequency is taken as the exact
+    // centre: on a distorted spectrum the measured centre can be off by more than the decoder copes with.
+    if let (Some(f), Some(_)) = (args.freq, args.symbol_rate) {
+        found.center_offset_hz = f - rec.frequency;
+    }
     println!(
         "Spectrum: center offset {:+.1} kHz, measured {:.1} kS/s -> {:.1} kS/s, roll-off {rolloff:.2}, SNR {:.1} dB",
         found.center_offset_hz / 1e3,

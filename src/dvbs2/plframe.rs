@@ -145,7 +145,8 @@ pub const PILOT_FREQ_LAG: usize = 24;
 /// Sum over all pilot blocks of `p[i + PILOT_FREQ_LAG]·conj(p[i])`, the pilots with their known
 /// value removed. Its argument is PILOT_FREQ_LAG times the frequency, independent of the phase.
 /// One frame's sum is too noisy at low SNR to place the phase between pilot blocks (that needs
-/// the frequency within π/1476 rad/symbol), so the receiver accumulates it over frames.
+/// the frequency within π/1476 rad/symbol), so the receiver averages it over frames, as a
+/// correction to its current estimate (the argument alone is ambiguous beyond ±π/PILOT_FREQ_LAG).
 fn pilot_correlation(body: &[Complex<f32>], scrambling: &[u8], pilot_blocks: usize) -> Complex<f32> {
     let s = std::f32::consts::FRAC_1_SQRT_2;
     let pilot = Complex::new(s, -s); // conjugate of (1 + j)/√2

@@ -36,6 +36,12 @@ const SCAN_EVERY_FRAMES: u32 = 12;
 const WIDEBAND_CENTER_MHZ: f64 = 10495.25;
 /// Lowest sample rate needed for the wideband view (MS/s).
 const WIDEBAND_MIN_RATE: f64 = 10.0;
+/// Automatic frequency correction: the decoder must have run this long before its carrier
+/// offset is trusted, and the offset must exceed the larger of the two limits.
+const AFC_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+const AFC_MIN_HZ: f64 = 1_000.0;
+/// Share of the symbol rate.
+const AFC_FRACTION: f64 = 0.015;
 /// QO-100 wideband transponder: downlink = uplink + this (MHz); 2401.5 MHz → 10491 MHz.
 const UPLINK_OFFSET_MHZ: f64 = 8089.5;
 
@@ -110,6 +116,8 @@ pub struct QodaApp {
     logo_tex: TextureHandle,
     /// Frequency changed while watching; the decoder restarts RESTART_DELAY after this moment.
     pending_restart: Option<std::time::Instant>,
+    /// When the decoder was last started (for the automatic frequency correction).
+    watch_started: std::time::Instant,
     /// Signals found in the visible band: (RF MHz, symbol rate kS/s, roll-off).
     signals: Vec<(f64, f32, f32)>,
     frames_since_scan: u32,
@@ -161,6 +169,7 @@ impl QodaApp {
             waterfall_tex: None,
             logo_tex,
             pending_restart: None,
+            watch_started: std::time::Instant::now(),
             signals: Vec::new(),
             frames_since_scan: 0,
             before_wideband: None,
@@ -372,6 +381,25 @@ impl QodaApp {
         self.send(Command::IqTap(Some((d.iq.clone(), d.dropped.clone()))));
         self.decoder = Some(d);
         self.video_seq = 0;
+        self.watch_started = std::time::Instant::now();
+    }
+
+    /// Automatic frequency correction: once locked, if the decoder measures the carrier well off
+    /// the selected frequency, moves the selection onto it and restarts. The matched filter is
+    /// centred on the selection, and a weak signal ~10 kHz off at 125 kS/s already loses frames;
+    /// the spectrum's centre can be that far off on a distorted signal.
+    fn auto_frequency_correction(&mut self, ctx: &egui::Context) {
+        let Some(d) = &self.decoder else { return };
+        if self.pending_restart.is_some() || self.watch_started.elapsed() < AFC_SETTLE {
+            return;
+        }
+        let s = d.status.lock().unwrap().stats.clone();
+        let limit = (AFC_MIN_HZ).max(self.symbol_rate_ks as f64 * 1e3 * AFC_FRACTION);
+        // The offset is measured on every frame found, decoded or not; a weak signal's lock comes and goes.
+        if s.frames_ok + s.frames_failed >= 2 && s.carrier_offset_hz.abs() > limit {
+            self.selected_mhz += s.carrier_offset_hz / 1e6;
+            self.start_watch(ctx);
+        }
     }
 
     fn stop_watch(&mut self) {
@@ -1208,6 +1236,7 @@ impl eframe::App for QodaApp {
                 ctx.request_repaint_after(RESTART_DELAY);
             }
         }
+        self.auto_frequency_correction(&ctx);
 
         if self.fullscreen {
             if self.decoder.is_none() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
