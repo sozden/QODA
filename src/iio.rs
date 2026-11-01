@@ -30,6 +30,7 @@ struct Api {
     buffer_end: unsafe extern "C" fn(Ptr) -> *const c_void,
     buffer_destroy: unsafe extern "C" fn(Ptr),
     buffer_push: unsafe extern "C" fn(Ptr) -> isize,
+    debug_attr_write: unsafe extern "C" fn(Ptr, *const c_char, *const c_char) -> isize,
     // The library must stay open as long as the function pointers are valid.
     _lib: Library,
 }
@@ -72,6 +73,7 @@ impl Api {
                 buffer_end: sym!("iio_buffer_end"),
                 buffer_destroy: sym!("iio_buffer_destroy"),
                 buffer_push: sym!("iio_buffer_push"),
+                debug_attr_write: sym!("iio_device_debug_attr_write"),
                 _lib: lib,
             })
         }
@@ -211,6 +213,7 @@ pub const MAX_TX_ATTENUATION: f64 = 89.75;
 pub struct IioTx {
     api: Api,
     context: Ptr,
+    phy: Ptr,
     /// The transmit settings channel of ad9361-phy (sample rate, bandwidth, attenuation).
     tx_config: Ptr,
     /// The TX_LO channel of ad9361-phy.
@@ -243,7 +246,7 @@ impl IioTx {
                 (api.context_destroy)(context);
                 return Err(format!("{uri}: transmitter channels not found"));
             }
-            let mut radio = Self { api, context, tx_config, tx_lo, buffer: std::ptr::null_mut() };
+            let mut radio = Self { api, context, phy, tx_config, tx_lo, buffer: std::ptr::null_mut() };
             // Off and fully attenuated until the caller has set everything up.
             radio.write_attr(tx_lo, "powerdown", "1")?;
             radio.set_attenuation(MAX_TX_ATTENUATION)?;
@@ -282,6 +285,13 @@ impl IioTx {
     /// Switches the transmitter's local oscillator on (the output stays silent until samples arrive).
     pub fn power_on(&mut self) -> Result<(), String> {
         self.write_attr(self.tx_lo, "powerdown", "0")
+    }
+
+    /// AD9361 digital loopback: 1 sends the transmit samples straight to the receive path inside
+    /// the chip, nothing reaches the antenna port; 0 is normal operation. For testing.
+    pub fn set_loopback(&mut self, mode: u8) -> Result<(), String> {
+        let n = unsafe { (self.api.debug_attr_write)(self.phy, cstr("loopback").as_ptr(), cstr(&mode.to_string()).as_ptr()) };
+        if n < 0 { Err(format!("loopback={mode}: error {n}")) } else { Ok(()) }
     }
 
     /// Number of samples one `write` call takes.
@@ -344,5 +354,73 @@ mod tests {
         let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
         println!("1 s of samples read in {elapsed:.2} s, RMS {rms:.4}, peak {peak:.4}");
         assert!(rms > 0.001 && peak < 1.0);
+    }
+
+    /// Sends a DVB-S2 test signal through the AD9361's digital loopback (transmitter LO off,
+    /// full attenuation: nothing is radiated) and records what the receiver gets as SigMF:
+    /// `QODA_IIO_LOOPBACK=ip:192.168.1.47 QODA_LOOPBACK_OUT=path cargo test --lib loopback -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn digital_loopback() {
+        use crate::dvbs2::tx::{Modulator, Shaper, TS_LEN, TxConfig};
+        let (Some(uri), Some(out)) = (std::env::var("QODA_IIO_LOOPBACK").ok(), std::env::var_os("QODA_LOOPBACK_OUT")) else { return };
+        let (rs, sps) = (333e3, 7usize);
+        let rate = rs * sps as f64;
+        let cfg = TxConfig { modcod: 4, short_frame: false, pilots: true, rolloff: 0.2 };
+        let mut m = Modulator::new(cfg).unwrap();
+        let packets: Vec<u8> = (0..4000u32)
+            .flat_map(|i| {
+                let mut p = vec![0x47, 0x01, 0x00, 0x10 | (i % 16) as u8];
+                p.extend((4..TS_LEN).map(|j| (i as usize * 7 + j) as u8));
+                p
+            })
+            .collect();
+        m.push_ts(&packets);
+        let mut shaper = Shaper::new(sps, cfg.rolloff);
+        let mut signal = Vec::new();
+        while let Some(f) = m.next_frame() {
+            shaper.process(&f, &mut signal);
+        }
+        let rms = (signal.iter().map(|z| z.norm_sqr()).sum::<f32>() / signal.len() as f32).sqrt();
+        signal.iter_mut().for_each(|z| *z *= 0.3 / rms);
+
+        let mut tx = IioTx::open(&uri).unwrap();
+        tx.set_sample_rate(rate).unwrap();
+        tx.set_loopback(1).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sender = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let chunk = tx.buffer_samples();
+                let mut pos = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let end = (pos + chunk).min(signal.len());
+                    tx.write(&signal[pos..end]).unwrap();
+                    pos = if end == signal.len() { 0 } else { end };
+                }
+                tx.set_loopback(0).unwrap();
+            })
+        };
+        let mut rx = IioRadio::open(&uri).unwrap();
+        rx.set_sample_rate(rate).unwrap();
+        rx.set_gain(Some(0.0)).unwrap();
+        let mut buf = vec![Complex::default(); (rate * 4.0) as usize];
+        let mut filled = 0;
+        while filled < buf.len() {
+            filled += rx.read(&mut buf[filled..]).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        sender.join().unwrap();
+        let rms = (buf.iter().map(|z| z.norm_sqr()).sum::<f32>() / buf.len() as f32).sqrt();
+        let peak = buf.iter().map(|z| z.re.abs().max(z.im.abs())).fold(0.0, f32::max);
+        println!("received RMS {rms:.4}, peak {peak:.4}");
+        let path = std::path::PathBuf::from(out);
+        let bytes: Vec<u8> = buf.iter().flat_map(|z| [z.re.to_le_bytes(), z.im.to_le_bytes()].concat()).collect();
+        std::fs::write(path.with_extension("sigmf-data"), bytes).unwrap();
+        std::fs::write(
+            path.with_extension("sigmf-meta"),
+            format!(r#"{{"global":{{"core:datatype":"cf32_le","core:sample_rate":{rate}}},"captures":[{{"core:frequency":0}}]}}"#),
+        )
+        .unwrap();
     }
 }

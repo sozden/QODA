@@ -132,6 +132,8 @@ qoda-tx --pattern <CALLSIGN> --pluto ip:192.168.2.1 --freq 10497.75 --rs 333 --m
 - The whole signal must lie inside the uplink band, 2401.5–2409.5 MHz; otherwise `qoda-tx` refuses.
 - `--atten dB` is the Pluto's output attenuation (default 30 dB, 0–89.75). Start high, watch your own signal on the downlink with QODA and lower it step by step; keep the signal below the beacon and the PA out of compression.
 - `--offset kHz` corrects the Pluto's oscillator error, `--seconds S` limits the time on air (default 30, at most 600). Ctrl+C switches the transmitter off.
+- `--loopback` sends the samples at the real rate through the AD9361's digital loopback with the transmitter off: it checks, without radiating anything, that the link to the Pluto keeps up (`qoda-tx` prints the rate it achieves and warns when it falls short; 333 kS/s needs about 75 Mbit/s).
+- On Windows PowerShell, run the programs in the current folder as `.\qoda-tx.exe`.
 - Other options: `--short`, `--no-pilots`, `--rolloff R`, `--sps N`.
 
 ## How it works
@@ -284,6 +286,8 @@ qoda-tx --pattern <ÇAĞRI-İŞARETİ> --pluto ip:192.168.2.1 --freq 10497.75 --
 - Sinyalin tamamı 2401,5–2409,5 MHz uplink bandının içinde olmalıdır; değilse `qoda-tx` yayını reddeder.
 - `--atten dB` Pluto'nun çıkış zayıflatmasıdır (varsayılan 30 dB, 0–89,75). Yüksekten başlayın, kendi sinyalinizi QODA ile downlink'te izleyerek adım adım düşürün; sinyal beacondan zayıf kalsın, amplifikatör doyuma girmesin.
 - `--offset kHz` Pluto'nun osilatör hatasını düzeltir, `--seconds S` yayın süresini sınırlar (varsayılan 30, en fazla 600). Ctrl+C vericiyi kapatır.
+- `--loopback` örnekleri gerçek hızda, verici kapalıyken AD9361'in dijital geri döngüsünden geçirir: Pluto bağlantısının yetip yetmediğini hiçbir şey yaymadan sınar (`qoda-tx` ulaşılan hızı yazar, yetmezse uyarır; 333 kS/s için yaklaşık 75 Mbit/s gerekir).
+- Windows PowerShell'de bulunduğunuz klasördeki programları `.\qoda-tx.exe` şeklinde çalıştırın.
 - Diğer seçenekler: `--short`, `--no-pilots`, `--rolloff R`, `--sps N`.
 
 ### Nasıl çalışır

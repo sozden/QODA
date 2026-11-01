@@ -50,12 +50,17 @@ struct Args {
     offset: f64,
     attenuation: f64,
     seconds: f64,
+    /// Send the samples through the AD9361's digital loopback with the transmitter off:
+    /// measures whether the link keeps up without radiating anything.
+    loopback: bool,
 }
 
 const USAGE: &str = "usage:
   qoda-tx <input.ts | --pattern CALLSIGN> --out <recording> [signal options]
   qoda-tx <input.ts | --pattern CALLSIGN> --pluto <uri> --freq <downlink MHz> [--offset kHz] [--atten dB] [--seconds S] [signal options]
 signal options: [--rs kS/s] [--modcod \"QPSK 1/2\"] [--short] [--no-pilots] [--rolloff R] [--sps N]
+--loopback with --pluto sends the samples at the real rate but only through the chip's digital loopback,
+  with the transmitter off: checks that the link keeps up without radiating anything
 --pattern makes a test broadcast (test card, 1 kHz tone, the call sign as service name) at the channel's exact bit rate";
 
 fn parse_modcod(text: &str) -> Result<u8, String> {
@@ -81,6 +86,7 @@ fn parse_args() -> Result<Args, String> {
         offset: 0.0,
         attenuation: DEFAULT_ATTENUATION_DB,
         seconds: DEFAULT_SECONDS,
+        loopback: false,
     };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
@@ -100,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
             "--offset" => args.offset = num(it.next(), &a)? * 1e3,
             "--atten" => args.attenuation = num(it.next(), &a)?,
             "--seconds" => args.seconds = num(it.next(), &a)?,
+            "--loopback" => args.loopback = true,
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}\n{USAGE}")),
             _ if args.input.as_os_str().is_empty() => args.input = PathBuf::from(a),
             _ => return Err(USAGE.into()),
@@ -292,22 +299,32 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
     radio.set_frequency(tx_hz)?;
     install_stop_handler();
     println!();
-    println!("*** TRANSMITTING ***  {uri}");
-    println!(
-        "    downlink {:.4} MHz, uplink {:.4} MHz (TX LO {:.4} MHz with {:+.1} kHz correction)",
-        downlink / 1e6,
-        uplink / 1e6,
-        tx_hz / 1e6,
-        args.offset / 1e3
-    );
-    println!("    attenuation {:.2} dB, up to {:.0} s; Ctrl+C stops", args.attenuation, args.seconds);
-    radio.set_attenuation(args.attenuation)?;
-    radio.power_on()?;
+    if args.loopback {
+        // The LO stays powered down and the attenuation at maximum, as `open` left them.
+        radio.set_loopback(1)?;
+        println!("LOOPBACK TEST, nothing is transmitted  {uri}");
+        println!("    {:.3} MS/s through the digital loopback for up to {:.0} s; Ctrl+C stops", sample_rate / 1e6, args.seconds);
+    } else {
+        radio.set_loopback(0)?;
+        println!("*** TRANSMITTING ***  {uri}");
+        println!(
+            "    downlink {:.4} MHz, uplink {:.4} MHz (TX LO {:.4} MHz with {:+.1} kHz correction)",
+            downlink / 1e6,
+            uplink / 1e6,
+            tx_hz / 1e6,
+            args.offset / 1e3
+        );
+        println!("    attenuation {:.2} dB, up to {:.0} s; Ctrl+C stops", args.attenuation, args.seconds);
+        radio.set_attenuation(args.attenuation)?;
+        radio.power_on()?;
+    }
 
     let chunk = radio.buffer_samples();
     let started = Instant::now();
     let mut last_report = Instant::now();
     let mut position = 0;
+    let mut sent = 0usize;
+    let mut starved = false;
     let mut block = Vec::with_capacity(chunk);
     while !STOP.load(Ordering::Relaxed) && started.elapsed().as_secs_f64() < args.seconds {
         // Loop over the signal, wrapping around at its end.
@@ -318,14 +335,34 @@ fn transmit(uri: &str, samples: &[Complex<f32>], sample_rate: f64, args: &Args) 
             position = (position + take) % scaled.len();
         }
         radio.write(&block)?;
+        sent += chunk;
         if last_report.elapsed() >= Duration::from_secs(1) {
             last_report = Instant::now();
-            print!("\r    on air {:.0} s ", started.elapsed().as_secs_f64());
+            // The device takes samples at the sample rate; if they arrive slower, its buffer
+            // runs dry and only the carrier leaking from the LO goes out.
+            let elapsed = started.elapsed().as_secs_f64();
+            let achieved = sent as f64 / elapsed;
+            starved |= elapsed > 3.0 && achieved < sample_rate * 0.98;
+            let state = if args.loopback { "running" } else { "on air" };
+            print!("\r    {state} {elapsed:.0} s, sending {:.3} of {:.3} MS/s ", achieved / 1e6, sample_rate / 1e6);
             let _ = std::io::stdout().flush();
         }
     }
+    if args.loopback {
+        radio.set_loopback(0)?;
+    }
     drop(radio);
-    println!("\rTransmitter off after {:.1} s.   ", started.elapsed().as_secs_f64());
+    let elapsed = started.elapsed().as_secs_f64();
+    println!("\rTransmitter off after {elapsed:.1} s; sent {:.3} MS/s on average.            ", sent as f64 / elapsed / 1e6);
+    if starved {
+        println!(
+            "WARNING: the samples did not reach the Pluto as fast as it sends them ({:.3} MS/s, about {:.0} Mbit/s);\n\
+             its buffer ran dry, so mostly an unmodulated carrier went out. A faster link (gigabit Ethernet or USB)\n\
+             or a lower symbol rate helps.",
+            sample_rate / 1e6,
+            sample_rate * 32.0 / 1e6
+        );
+    }
     Ok(())
 }
 
