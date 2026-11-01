@@ -75,6 +75,10 @@ struct TxApp {
     job: Option<Job>,
     /// Log of finished jobs, kept when a new one starts.
     log: Vec<(Color32, String)>,
+    /// The TS file's mux rate as measured, for the path and modification time it was measured at.
+    file_rate: Option<(String, Option<std::time::SystemTime>, Result<f64, String>)>,
+    /// The operator confirmed being licensed and keeping the signal below the beacon (this session).
+    confirmed: bool,
 }
 
 impl TxApp {
@@ -98,9 +102,27 @@ impl TxApp {
             seconds: transmit::DEFAULT_SECONDS,
             job: None,
             log: Vec::new(),
+            file_rate: None,
+            confirmed: false,
         };
         app.load();
         app
+    }
+
+    /// Measures the TS file's mux rate when the file or its path changes.
+    fn refresh_file_rate(&mut self) {
+        let path = self.file.trim().to_string();
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if self.file_rate.as_ref().is_some_and(|(p, m, _)| *p == path && *m == modified) {
+            return;
+        }
+        let rate = if modified.is_none() {
+            Err(String::new())
+        } else {
+            transmit::read_ts(std::path::Path::new(&path))
+                .and_then(|packets| transmit::ts_bitrate(&packets).ok_or_else(|| "no clock references (PCR) in the file".to_string()))
+        };
+        self.file_rate = Some((path, modified, rate));
     }
 
     /// English or Turkish text.
@@ -145,6 +167,22 @@ impl TxApp {
             }
             Source::File if !std::path::Path::new(self.file.trim()).is_file() => {
                 Some(self.tr("Choose an MPEG-TS file.", "Bir MPEG-TS dosyası seçin.").into())
+            }
+            Source::File => {
+                // The stream is sent at the channel's capacity, so the file must be muxed at it.
+                let capacity = plan.capacity()?;
+                match self.file_rate.as_ref().map(|(_, _, r)| r) {
+                    Some(Ok(rate)) if ((rate - capacity) / capacity).abs() > transmit::RATE_TOLERANCE => Some(format!(
+                        "{} {:.1} kbit/s, {} {:.1} kbit/s (FFmpeg: -muxrate {})",
+                        self.tr("The file is muxed at", "Dosya şu hızda paketlenmiş:"),
+                        rate / 1e3,
+                        self.tr("the channel carries", "kanal kapasitesi:"),
+                        capacity / 1e3,
+                        capacity.floor() as u64
+                    )),
+                    Some(Err(e)) if !e.is_empty() => Some(e.clone()),
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -346,7 +384,11 @@ impl TxApp {
                         }
                         Source::File => {
                             ui.add(egui::TextEdit::singleline(&mut self.file).hint_text(tr("Path of a .ts file (or drop it here)", ".ts dosyasının yolu (ya da buraya bırakın)")).desired_width(f32::INFINITY));
-                            ui.label(RichText::new(tr("Mux it at or below the TS capacity shown on the right", "Sağda görünen TS kapasitesinde ya da altında paketlenmiş olmalı")).size(11.0).color(MUTED));
+                            let info = match self.file_rate.as_ref().map(|(_, _, r)| r) {
+                                Some(Ok(rate)) => format!("{} {:.1} kbit/s", tr("Muxed at", "Paket hızı:"), rate / 1e3),
+                                _ => tr("Mux it at the TS capacity shown on the right", "Sağda görünen TS kapasitesinde paketlenmiş olmalı").to_string(),
+                            };
+                            ui.label(RichText::new(info).size(11.0).color(MUTED));
                         }
                     }
                 });
@@ -445,9 +487,10 @@ impl TxApp {
                     .fill(BAD.gamma_multiply(0.85))
                     .min_size(vec2(260.0, 64.0))
                     .corner_radius(10);
-                let response = ui.add_enabled(problem.is_none(), button);
+                let response = ui.add_enabled(problem.is_none() && self.confirmed, button);
                 let response = match &problem {
                     Some(p) => response.on_disabled_hover_text(p.as_str()),
+                    None if !self.confirmed => response.on_disabled_hover_text(self.tr("Tick the confirmation below first", "Önce aşağıdaki onayı işaretleyin")),
                     None => response.on_hover_text(self.tr("Transmits on the QO-100 uplink until the time limit or STOP", "Süre sınırına ya da DURDUR'a kadar QO-100 uplink'inde yayın yapar")),
                 };
                 if response.clicked() {
@@ -470,6 +513,20 @@ impl TxApp {
         ui.add_space(8.0);
         if let Some(p) = problem.filter(|_| !busy) {
             ui.label(RichText::new(p).color(WARN));
+        }
+        if !busy {
+            // Before the first transmission of a session: the operator's own responsibility.
+            egui::Frame::new().fill(WARN.gamma_multiply(0.08)).stroke(Stroke::new(1.0, WARN.gamma_multiply(0.5))).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(self.tr(
+                    "Transmitting needs an amateur radio licence. On QO-100 your signal must stay weaker than the beacon and inside the wideband band plan. \
+                     Start with high attenuation, watch your own signal on the downlink with QODA, and lower the attenuation step by step.",
+                    "Yayın yapmak için amatör telsiz lisansı gerekir. QO-100'de sinyaliniz beacondan zayıf kalmalı ve geniş bant bant planına uymalıdır. \
+                     Yüksek zayıflatmayla başlayın, kendi sinyalinizi QODA ile downlink'te izleyin ve zayıflatmayı adım adım düşürün.",
+                )).size(12.0).color(TEXT));
+                let label = self.tr("I am licensed and will keep my signal below the beacon", "Lisansım var; sinyalimi beacondan zayıf tutacağım");
+                ui.checkbox(&mut self.confirmed, label);
+            });
         }
         if busy {
             let (text, color) = if preparing {
@@ -523,6 +580,9 @@ impl eframe::App for TxApp {
         if let Some(path) = ui.ctx().input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
             self.file = path.display().to_string();
             self.source = Source::File;
+        }
+        if self.source == Source::File {
+            self.refresh_file_rate();
         }
         let bar = egui::Frame::new().fill(CARD).inner_margin(egui::Margin::symmetric(14, 8));
         egui::Panel::top("header").frame(bar).show(ui, |ui| self.header(ui));

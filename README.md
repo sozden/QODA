@@ -115,7 +115,28 @@ qoda-analyze recordings/<name>
 
 `qoda-tx` is a DVB-S2 modulator for licensed radio amateurs. It turns an MPEG-TS file, or a test broadcast it makes with FFmpeg, into DVB-S2 and either writes a SigMF recording or transmits it on the QO-100 wideband uplink with an ADALM-Pluto.
 
-**QODA TX** (`qoda-tx-gui`) does the same in a window: enter the Pluto's address and your call sign, pick the downlink frequency, symbol rate and MODCOD, check the link with **Link test** (nothing is radiated) and press **TRANSMIT**. The command line tool below offers the same and a few more options.
+You need an amateur radio licence. On QO-100 your signal must stay weaker than the beacon and inside the wideband band plan.
+
+### QODA TX: your first transmission
+
+**QODA TX** (`qoda-tx-gui`) is the transmitter in a window. It was tested with an ADALM-Pluto (firmware 0.25, over Ethernet), a 4 W PA and a 2 m dish: the test broadcast at 125 and 66 kS/s QPSK 1/2 went through QO-100 and QODA decoded it without losing a frame.
+
+![QODA TX](docs/qoda-tx.png)
+
+1. **ADALM-PLUTO**: the Pluto's address, e.g. `192.168.2.1` (or `usb:`). Close SDR-Console or any other program using it first.
+2. **SOURCE**: *Test broadcast* with your call sign (colour bars, the call sign, frequency and mode, a frame counter and a 1 kHz tone, made with FFmpeg at the channel's exact bit rate), or a *TS file* of your own. A file must be muxed at the TS capacity shown on the right; QODA TX measures it and says so if not.
+3. **Frequency**: the downlink frequency of the signal's centre; the uplink, the Pluto's LO and the bandwidth follow. Pick a free spot in the transponder; QODA TX refuses frequencies whose signal would leave the band.
+4. **SIGNAL**: start with **125 kS/s, QPSK 1/2**. With a few watts, a lower symbol rate gives a stronger signal (66 kS/s is 2.7 dB stronger than 125), a higher one a better picture.
+5. **Link test** sends the signal to the Pluto at the real rate with the transmitter off: the log shows the Pluto's settings and the rate the link achieves. Nothing is radiated.
+6. **POWER AND TIME**: leave the attenuation at 30 dB for the first try. Tick the confirmation, press **TRANSMIT** and watch your signal in QODA (another receiver on the downlink). Lower the attenuation step by step until QODA decodes it with some margin, keeping the signal below the beacon. **STOP**, the time limit or closing the window switch the transmitter off.
+
+In QODA, click your signal and press **Watch**: the symbol rate and the frequency are found by themselves (automatic frequency correction).
+
+![The test broadcast received through QO-100](docs/tx-received.png)
+
+If the picture stops while QODA TX still shows ON AIR, switch the Pluto and the PA off and on: a PA that switches to transmit by sensing RF can hang after many short transmissions.
+
+### qoda-tx on the command line
 
 Check the signal without transmitting; QODA's own decoder reads it back:
 
@@ -273,7 +294,28 @@ qoda-analyze recordings/<ad>
 
 `qoda-tx`, lisanslı radyo amatörleri için bir DVB-S2 modülatörüdür. Bir MPEG-TS dosyasını ya da FFmpeg ile kendi ürettiği test yayınını DVB-S2'ye çevirir; SigMF kaydı olarak yazar ya da ADALM-Pluto ile QO-100 geniş bant uplink'inde yayınlar.
 
-**QODA TX** (`qoda-tx-gui`) aynı işi bir pencerede yapar: Pluto'nun adresini ve çağrı işaretinizi girin, downlink frekansını, sembol hızını ve MODCOD'u seçin, **Bağlantı testi** ile bağlantıyı sınayın (hiçbir şey yayılmaz) ve **YAYINLA**'ya basın. Aşağıdaki komut satırı aracı aynı işlevleri ve birkaç ek seçeneği sunar.
+Amatör telsiz lisansı gerekir. QO-100'de sinyaliniz beacondan zayıf kalmalı ve geniş bant bant planına uymalıdır.
+
+#### QODA TX ile ilk yayın
+
+**QODA TX** (`qoda-tx-gui`) vericinin pencereli halidir. ADALM-Pluto (yazılım 0.25, Ethernet üzerinden), 4 W'lık bir amplifikatör ve 2 m'lik çanakla denendi: 125 ve 66 kS/s QPSK 1/2 test yayını QO-100'den geçti ve QODA tek çerçeve kaybetmeden çözdü.
+
+![QODA TX](docs/qoda-tx.png)
+
+1. **ADALM-PLUTO**: Pluto'nun adresi, ör. `192.168.2.1` (ya da `usb:`). Önce SDR-Console'u ya da Pluto'yu kullanan başka programı kapatın.
+2. **KAYNAK**: Çağrı işaretinizle *Test yayını* (renk çubukları, çağrı işareti, frekans ve mod, kare sayacı ve 1 kHz ton; FFmpeg ile kanalın tam bit hızında üretilir) ya da kendi *TS dosyanız*. Dosya, sağda görünen TS kapasitesinde paketlenmiş olmalıdır; QODA TX bunu ölçer, uymuyorsa söyler.
+3. **Frekans**: sinyal merkezinin downlink frekansı; uplink, Pluto osilatörü ve bant genişliği ondan hesaplanır. Transponderde boş bir yer seçin; sinyali bandın dışına taşacak frekansları QODA TX reddeder.
+4. **SİNYAL**: **125 kS/s, QPSK 1/2** ile başlayın. Birkaç watt'la düşük sembol hızı daha güçlü sinyal verir (66 kS/s, 125'ten 2,7 dB güçlüdür), yüksek sembol hızı daha iyi görüntü.
+5. **Bağlantı testi** sinyali gerçek hızda, verici kapalıyken Pluto'ya gönderir: günlükte Pluto'nun ayarları ve bağlantının ulaştığı hız görünür. Hiçbir şey yayılmaz.
+6. **GÜÇ VE SÜRE**: İlk denemede zayıflatmayı 30 dB'de bırakın. Onayı işaretleyip **YAYINLA**'ya basın ve sinyalinizi QODA'da (downlink'teki başka bir alıcıda) izleyin. Zayıflatmayı, QODA biraz payla çözene kadar adım adım düşürün; sinyal beacondan zayıf kalsın. **DURDUR**, süre sınırı ya da pencerenin kapatılması vericiyi kapatır.
+
+QODA'da sinyalinize tıklayıp **İzle**'ye basın: sembol hızı ve frekans kendiliğinden bulunur (otomatik frekans düzeltmesi).
+
+![QO-100'den alınan test yayını](docs/tx-received.png)
+
+QODA TX "YAYINDA" gösterirken görüntü gelmiyorsa Pluto'yu ve amplifikatörü kapatıp açın: RF algılayarak yayına geçen amplifikatörler, art arda çok sayıda kısa yayından sonra takılı kalabiliyor.
+
+#### Komut satırında qoda-tx
 
 Sinyali yayın yapmadan kontrol edin; QODA'nın kendi çözücüsü geri okur:
 

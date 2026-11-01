@@ -264,6 +264,53 @@ pub fn read_ts(path: &Path) -> Result<Vec<u8>, String> {
     Ok(ts[start..].chunks_exact(TS_LEN).filter(|p| p[0] == 0x47).flatten().copied().collect())
 }
 
+/// The bit rate a TS is muxed at (bit/s), from the program clock references of its first PCR
+/// PID: bytes between the first and the last PCR over the time between them. `None` without
+/// two PCRs.
+pub fn ts_bitrate(packets: &[u8]) -> Option<f64> {
+    let mut pcr_pid = None;
+    let (mut first, mut last) = (None, None);
+    for (index, p) in packets.chunks_exact(TS_LEN).enumerate() {
+        if p[3] & 0x20 == 0 || p[4] < 7 || p[5] & 0x10 == 0 {
+            continue;
+        }
+        let pid = (((p[1] & 0x1F) as u16) << 8) | p[2] as u16;
+        if *pcr_pid.get_or_insert(pid) != pid {
+            continue;
+        }
+        let b = &p[6..12];
+        let base = ((b[0] as u64) << 25) | ((b[1] as u64) << 17) | ((b[2] as u64) << 9) | ((b[3] as u64) << 1) | ((b[4] as u64) >> 7);
+        let ext = (((b[4] & 1) as u64) << 8) | b[5] as u64;
+        let pcr = base * 300 + ext;
+        first.get_or_insert((index, pcr));
+        last = Some((index, pcr));
+    }
+    let ((i0, t0), (i1, t1)) = (first?, last?);
+    if i1 <= i0 || t1 <= t0 {
+        return None;
+    }
+    Some(((i1 - i0) * TS_LEN * 8) as f64 / ((t1 - t0) as f64 / 27e6))
+}
+
+/// Largest relative difference between a file's mux rate and the channel's capacity. The
+/// stream is sent at the capacity: a faster file falls behind its clock, a slower one plays fast.
+pub const RATE_TOLERANCE: f64 = 0.03;
+
+/// Whether a TS fits the channel; an error that says how to mux it otherwise.
+pub fn check_ts_rate(packets: &[u8], capacity: f64) -> Result<f64, String> {
+    let rate = ts_bitrate(packets).ok_or("the TS file has no clock references (PCR); its rate cannot be checked")?;
+    if ((rate - capacity) / capacity).abs() > RATE_TOLERANCE {
+        return Err(format!(
+            "the TS file is muxed at {:.1} kbit/s but the channel carries {:.1} kbit/s; mux it at the channel's rate, \
+             e.g. FFmpeg's -muxrate {}",
+            rate / 1e3,
+            capacity / 1e3,
+            capacity.floor() as u64
+        ));
+    }
+    Ok(rate)
+}
+
 /// All packets → RRC-shaped samples; the last frame is filled with null packets.
 pub fn modulate(packets: &[u8], cfg: TxConfig, sps: usize) -> Result<Vec<Complex<f32>>, String> {
     let mut modulator = Modulator::new(cfg)?;
@@ -679,6 +726,28 @@ mod tests {
         assert!(rx.stats.frames_ok >= 8, "{} frames", rx.stats.frames_ok);
         assert_eq!(rx.stats.frames_failed, 0);
         assert_eq!(rx.stats.ts_cc_errors, 0);
+    }
+
+    #[test]
+    fn measures_ts_rate_from_pcr() {
+        // PCR every 10 packets on PID 0x100, advancing as if muxed at 120 kbit/s.
+        let rate = 120_000.0;
+        let mut ts = Vec::new();
+        for i in 0..200usize {
+            let mut p = vec![0x47, 0x01, 0x00, 0x10];
+            if i % 10 == 0 {
+                let pcr = ((i * TS_LEN * 8) as f64 / rate * 27e6) as u64;
+                let (base, ext) = (pcr / 300, pcr % 300);
+                p[3] = 0x30;
+                p.extend([7, 0x10, (base >> 25) as u8, (base >> 17) as u8, (base >> 9) as u8, (base >> 1) as u8, (((base & 1) as u8) << 7) | 0x7E | (ext >> 8) as u8, ext as u8]);
+            }
+            p.resize(TS_LEN, 0xFF);
+            ts.extend(p);
+        }
+        let measured = ts_bitrate(&ts).unwrap();
+        assert!((measured - rate).abs() < 100.0, "{measured}");
+        assert!(check_ts_rate(&ts, 120_700.0).is_ok());
+        assert!(check_ts_rate(&ts, 150_000.0).is_err());
     }
 
     #[test]

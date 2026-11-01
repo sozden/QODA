@@ -29,6 +29,13 @@ All notable changes to QODA are listed here. The format follows
   through the digital loopback, an ON AIR banner with time and achieved sample rate, and a log.
   English and Turkish; settings are kept in `tx-settings.txt` next to QODA's settings. The
   transmit logic moved to `qoda::transmit`, shared with `qoda-tx`.
+- QODA TX asks before the first transmission of a session for a confirmation (licensed, signal
+  kept below the beacon) next to a short note on starting with high attenuation; TRANSMIT stays
+  disabled until it is ticked. The link test needs no confirmation.
+- A TS file's mux rate is measured from its PCRs and compared with the channel's capacity: QODA TX
+  shows it and refuses a file more than 3% off, with the `-muxrate` to use; `qoda-tx` refuses it
+  too unless `--ignore-rate` is given.
+- README: "QODA TX: your first transmission" step by step, with screenshots, in English and Turkish.
 - The transmitter plays its TS as one endless stream, modulated as it is sent: on every pass
   the continuity counters carry on and PCR/PTS/DTS move on by the length of the file, so the
   20 s test broadcast loops without the continuity errors and the picture hiccup at each restart.

@@ -32,6 +32,8 @@ struct Args {
     air: AirSettings,
     /// With `--out`: write this many passes of the endless stream as sent on air.
     loops: u32,
+    /// Transmit a TS file even if its mux rate does not match the channel.
+    ignore_rate: bool,
 }
 
 const USAGE: &str = "usage:
@@ -43,6 +45,7 @@ signal options: [--rs kS/s] [--modcod \"QPSK 1/2\"] [--short] [--no-pilots] [--r
 --loopback with --pluto sends the samples at the real rate but only through the chip's digital loopback,
   with the transmitter off: checks that the link keeps up without radiating anything
 --loops N with --out writes N passes of the endless stream exactly as sent on air (shifted from the centre)
+a TS file must be muxed at the channel's TS capacity (within 3%); --ignore-rate transmits it anyway
 --pattern makes a test broadcast (test card, 1 kHz tone, the call sign as service name) at the channel's exact bit rate";
 
 fn parse_args() -> Result<Args, String> {
@@ -68,6 +71,7 @@ fn parse_args() -> Result<Args, String> {
             loopback: false,
         },
         loops: 0,
+        ignore_rate: false,
     };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
@@ -94,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
             "--seconds" => args.air.seconds = num(it.next(), &a)?,
             "--loopback" => args.air.loopback = true,
             "--loops" => args.loops = num(it.next(), &a)? as u32,
+            "--ignore-rate" => args.ignore_rate = true,
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}\n{USAGE}")),
             _ if args.input.as_os_str().is_empty() => args.input = PathBuf::from(a),
             _ => return Err(USAGE.into()),
@@ -132,6 +137,14 @@ fn run() -> Result<(), String> {
     };
     let packets = transmit::read_ts(&input)?;
     let transmitting = args.pluto.is_some();
+    // A file of one's own must be muxed at the channel's rate; the test broadcast is.
+    if args.pattern.is_none() {
+        match transmit::check_ts_rate(&packets, capacity) {
+            Ok(rate) => println!("TS file muxed at {:.1} kbit/s", rate / 1e3),
+            Err(e) if transmitting && !args.ignore_rate => return Err(format!("{e} (--ignore-rate sends it anyway)")),
+            Err(e) => println!("WARNING: {e}"),
+        }
+    }
     let sps = plan.samples_per_symbol(transmitting);
     let sample_rate = plan.sample_rate(transmitting);
     println!(
