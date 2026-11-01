@@ -6,6 +6,8 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
 ### Added
 - DVB-S2 transmitter, first step: `qoda-tx` modulates an MPEG-TS file into a SigMF IQ recording
   (QPSK, 8PSK and 16APSK, normal and short frames, with or without pilots), at an integer number
@@ -153,7 +155,8 @@ First release.
 - Windows package with SoapySDR, the RTL-SDR and HackRF drivers and libiio, in two variants:
   with and without FFmpeg. `qoda --diagnose` reports what the program finds.
 
-[Unreleased]: https://github.com/sozden/QODA/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/sozden/QODA/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sozden/QODA/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/sozden/QODA/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/sozden/QODA/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/sozden/QODA/compare/v0.1.1...v0.1.2
