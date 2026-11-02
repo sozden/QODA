@@ -6,6 +6,22 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Volume control for the broadcast's audio (0–400%) and an optional automatic level that keeps
+  the loudness about the same from broadcast to broadcast; both apply at once and are remembered.
+  The audio is now decoded by ffmpeg and scaled by QODA before ffplay plays it.
+- LNB LO: a menu of common LO frequencies (including 0 for no LNB) and a button that sets the LO
+  to 0 and, pressed again, returns to the previous LO.
+- Full screen with the keyboard: F11, or F while no text field is being edited.
+
+### Fixed
+- Watching a broadcast picked in the wideband view lost frames every second or so with a network
+  receiver (LibreSDR): at 12 MS/s the link drops samples. Watch now first narrows to the lowest
+  sample rate that holds the broadcast (at least twice its bandwidth), centred on it.
+
+### Changed
+- The yAtölye badge next to the QODA title is gone; the name stays in the status bar.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

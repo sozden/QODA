@@ -10,13 +10,25 @@ use crate::i18n::Lang;
 pub struct UserSettings {
     pub lang: Lang,
     pub lnb_lo_mhz: f64,
+    /// LO to return to after it was set to zero.
+    pub saved_lo_mhz: f64,
+    /// Audio volume, 1.0 = unchanged.
+    pub volume: f32,
+    pub auto_level: bool,
     /// libiio URIs of added network receivers.
     pub network_devices: Vec<String>,
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { lang: Lang::En, lnb_lo_mhz: 9750.0, network_devices: Vec::new() }
+        Self {
+            lang: Lang::En,
+            lnb_lo_mhz: 9750.0,
+            saved_lo_mhz: 9750.0,
+            volume: 1.0,
+            auto_level: false,
+            network_devices: Vec::new(),
+        }
     }
 }
 
@@ -42,6 +54,9 @@ impl UserSettings {
             match key.trim() {
                 "lang" => s.lang = Lang::from_code(value.trim()).unwrap_or(s.lang),
                 "lnb_lo_mhz" => s.lnb_lo_mhz = value.trim().parse().unwrap_or(s.lnb_lo_mhz),
+                "saved_lo_mhz" => s.saved_lo_mhz = value.trim().parse().unwrap_or(s.saved_lo_mhz),
+                "volume" => s.volume = value.trim().parse().unwrap_or(s.volume),
+                "auto_level" => s.auto_level = value.trim() == "1",
                 "network_device" => s.network_devices.push(value.trim().to_string()),
                 _ => {}
             }
@@ -55,7 +70,14 @@ impl UserSettings {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let mut text = format!("lang={}\nlnb_lo_mhz={}\n", self.lang.code(), self.lnb_lo_mhz);
+        let mut text = format!(
+            "lang={}\nlnb_lo_mhz={}\nsaved_lo_mhz={}\nvolume={}\nauto_level={}\n",
+            self.lang.code(),
+            self.lnb_lo_mhz,
+            self.saved_lo_mhz,
+            self.volume,
+            u8::from(self.auto_level)
+        );
         for uri in &self.network_devices {
             text += &format!("network_device={uri}\n");
         }

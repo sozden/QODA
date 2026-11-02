@@ -6,7 +6,9 @@ use eframe::egui::{
     Stroke, TextureHandle, TextureOptions, Vec2, pos2, vec2,
 };
 
-use crate::decoder::{self, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
+use std::sync::Arc;
+
+use crate::decoder::{self, AudioControl, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
 use crate::i18n::{Lang, Strings, fill};
 use crate::logo;
 use crate::sdr::{self, Command, DeviceInfo, DeviceKind, Event, Frame, SdrError, Settings};
@@ -46,6 +48,19 @@ const AFC_MIN_HZ: f64 = 1_000.0;
 const AFC_FRACTION: f64 = 0.015;
 /// QO-100 wideband transponder: downlink = uplink + this (MHz); 2401.5 MHz → 10491 MHz.
 const UPLINK_OFFSET_MHZ: f64 = 8089.5;
+/// Watching from the wideband view: sample rate at least this many times the signal's bandwidth...
+const WATCH_RATE_MARGIN: f64 = 2.0;
+/// ...and at least this (MS/s).
+const WATCH_MIN_RATE: f64 = 2.4;
+/// Common LNB local oscillators (MHz, note); 0 means the receiver is fed the RF directly.
+const LO_PRESETS: &[(f64, &str)] = &[
+    (0.0, ""),
+    (9750.0, "Universal low band / QO-100"),
+    (10600.0, "Universal high band"),
+    (10750.0, "Single LO"),
+    (11300.0, "Single LO"),
+    (5150.0, "C band"),
+];
 
 /// Status bar message; shown in the selected language.
 enum Status {
@@ -70,6 +85,10 @@ pub struct QodaApp {
     status: Status,
 
     lo_mhz: f64,
+    /// LO to return to after it was set to zero.
+    saved_lo_mhz: f64,
+    /// Volume and automatic level, shared with the audio thread.
+    audio_control: Arc<AudioControl>,
     /// RF centre frequency the receiver is tuned to.
     center_mhz: f64,
     /// RF frequency of the signal selected on the spectrum.
@@ -133,6 +152,8 @@ impl QodaApp {
             handle: None,
             status,
             lo_mhz: user.lnb_lo_mhz,
+            saved_lo_mhz: user.saved_lo_mhz,
+            audio_control: Arc::new(AudioControl::new(user.volume, user.auto_level)),
             center_mhz: 10491.5,
             selected_mhz: 10491.5,
             symbol_rate_ks: 1000.0,
@@ -169,7 +190,15 @@ impl QodaApp {
     }
 
     fn save_settings(&self) {
-        UserSettings { lang: self.lang, lnb_lo_mhz: self.lo_mhz, network_devices: self.network_devices.clone() }.save();
+        UserSettings {
+            lang: self.lang,
+            lnb_lo_mhz: self.lo_mhz,
+            saved_lo_mhz: self.saved_lo_mhz,
+            volume: self.audio_control.volume(),
+            auto_level: self.audio_control.auto_level(),
+            network_devices: self.network_devices.clone(),
+        }
+        .save();
     }
 
     fn status_text(&self) -> String {
@@ -343,6 +372,22 @@ impl QodaApp {
     }
 
     /// Starts decoding the selected signal live and showing its video.
+    /// The Watch button. The wideband view's top rate loses samples on network receivers (a
+    /// LibreSDR at 12 MS/s drops enough to break the lock every second or so), so watching
+    /// from it first narrows to the lowest rate that holds the signal, centred on it.
+    fn watch(&mut self, ctx: &egui::Context) {
+        if self.handle.is_some() && self.before_wideband.take().is_some() {
+            let needed = (self.occupied_khz() as f64 / 1000.0 * WATCH_RATE_MARGIN).max(WATCH_MIN_RATE);
+            let rates = self.device_kind().sample_rates();
+            let rate = rates.iter().copied().find(|&r| r >= needed).or(rates.last().copied());
+            if let Some(rate) = rate {
+                self.send_sample_rate(rate);
+            }
+            self.center_on(ctx, self.selected_mhz);
+        }
+        self.start_watch(ctx);
+    }
+
     fn start_watch(&mut self, ctx: &egui::Context) {
         self.stop_watch();
         if self.handle.is_none() {
@@ -362,7 +407,7 @@ impl QodaApp {
             rolloff: self.rolloff as f64,
         };
         let ctx = ctx.clone();
-        let d = decoder::spawn(cfg, self.audio, move || ctx.request_repaint());
+        let d = decoder::spawn(cfg, self.audio.then(|| Arc::clone(&self.audio_control)), move || ctx.request_repaint());
         self.send(Command::IqTap(Some((d.iq.clone(), d.dropped.clone()))));
         self.decoder = Some(d);
         self.video_seq = 0;
@@ -549,8 +594,6 @@ impl QodaApp {
                 ui.label(RichText::new("QODA").size(24.0).strong().color(ACCENT));
                 ui.label(RichText::new(t.app_subtitle).size(12.0).color(MUTED));
             });
-            ui.add_space(6.0);
-            yatolye_badge(ui, t);
             ui.add_space(24.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new(t.broadcast_caps).size(10.0).color(MUTED));
@@ -591,7 +634,7 @@ impl QodaApp {
                     if watching {
                         self.stop_watch();
                     } else {
-                        self.start_watch(ui.ctx());
+                        self.watch(ui.ctx());
                     }
                 }
                 let running = self.handle.is_some();
@@ -719,9 +762,39 @@ impl QodaApp {
         let lo_before = self.lo_mhz;
         egui::Grid::new("frequency").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             ui.label(RichText::new(t.lnb_lo).color(MUTED));
-            retune |= ui
-                .add(egui::DragValue::new(&mut self.lo_mhz).speed(0.01).range(0.0..=30_000.0).suffix(" MHz"))
-                .changed();
+            ui.horizontal(|ui| {
+                retune |= ui
+                    .add(egui::DragValue::new(&mut self.lo_mhz).speed(0.01).range(0.0..=30_000.0).suffix(" MHz"))
+                    .changed();
+                egui::ComboBox::from_id_salt("lo_presets")
+                    .width(24.0)
+                    .selected_text("")
+                    .show_ui(ui, |ui| {
+                        for &(mhz, note) in LO_PRESETS {
+                            let label = if mhz == 0.0 {
+                                t.lo_none.to_string()
+                            } else {
+                                format!("{mhz:.1} MHz · {note}")
+                            };
+                            if ui.selectable_label(self.lo_mhz == mhz, label).clicked() {
+                                self.lo_mhz = mhz;
+                                retune = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(t.lo_presets_tooltip);
+                // One button sets the LO to zero and brings the previous value back.
+                let (label, hover) = if self.lo_mhz == 0.0 { ("↺", t.lo_restore_tooltip) } else { ("0", t.lo_zero_tooltip) };
+                if ui.button(label).on_hover_text(hover).clicked() {
+                    if self.lo_mhz == 0.0 {
+                        self.lo_mhz = self.saved_lo_mhz;
+                    } else {
+                        self.lo_mhz = 0.0;
+                    }
+                    retune = true;
+                }
+            });
             ui.end_row();
             ui.label(RichText::new(t.center_rf).color(MUTED));
             retune |= freq_tuner(ui, &mut self.center_mhz, 16.0);
@@ -756,6 +829,9 @@ impl QodaApp {
             self.retune(ui.ctx(), self.center_mhz);
         }
         if self.lo_mhz != lo_before {
+            if lo_before != 0.0 && self.lo_mhz == 0.0 {
+                self.saved_lo_mhz = lo_before;
+            }
             self.save_settings();
         }
     }
@@ -822,6 +898,21 @@ impl QodaApp {
         if self.audio != before && self.decoder.is_some() {
             self.start_watch(ui.ctx());
         }
+        ui.add_enabled_ui(self.audio, |ui| {
+            let mut percent = (self.audio_control.volume() * 100.0).round();
+            let mut auto = self.audio_control.auto_level();
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t.volume).color(MUTED));
+                changed |= ui.add(egui::Slider::new(&mut percent, 0.0..=400.0).suffix(" %")).changed();
+            });
+            changed |= ui.checkbox(&mut auto, t.auto_level).on_hover_text(t.auto_level_tooltip).changed();
+            if changed {
+                self.audio_control.set_volume(percent / 100.0);
+                self.audio_control.set_auto_level(auto);
+                self.save_settings();
+            }
+        });
         let Some(d) = &self.decoder else {
             ui.label(RichText::new(t.not_watching).color(MUTED));
             return;
@@ -1201,7 +1292,7 @@ impl QodaApp {
             ui.label(RichText::new(self.status_text()).size(12.0).color(MUTED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new("GPL-3.0").size(11.0).color(MUTED));
-                ui.label(RichText::new("yAtölye").size(13.0).strong().color(BAND));
+                ui.label(RichText::new("yAtölye").size(13.0).strong().color(BAND)).on_hover_text(self.t().yatolye_tooltip);
                 ui.label(RichText::new("QODA ·").size(13.0).color(MUTED));
             });
         });
@@ -1222,6 +1313,14 @@ impl eframe::App for QodaApp {
             }
         }
         self.auto_frequency_correction(&ctx);
+
+        // F11 anywhere, or F while no text field has the keyboard, toggles full screen.
+        let typing = ctx.egui_wants_keyboard_input();
+        if self.decoder.is_some()
+            && ctx.input(|i| i.key_pressed(egui::Key::F11) || (!typing && i.key_pressed(egui::Key::F) && i.modifiers.is_none()))
+        {
+            self.set_fullscreen(&ctx, !self.fullscreen);
+        }
 
         if self.fullscreen {
             if self.decoder.is_none() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1311,19 +1410,6 @@ fn describe_streams(service: &ServiceInfo, t: &Strings) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Prominent badge of the "yeniden atölye" working group.
-fn yatolye_badge(ui: &mut egui::Ui, t: &Strings) {
-    egui::Frame::new()
-        .fill(BAND.gamma_multiply(0.12))
-        .stroke(Stroke::new(1.0, BAND.gamma_multiply(0.7)))
-        .corner_radius(CornerRadius::same(14))
-        .inner_margin(egui::Margin::symmetric(12, 4))
-        .show(ui, |ui| {
-            ui.label(RichText::new("yAtölye").size(17.0).strong().color(BAND))
-                .on_hover_text(t.yatolye_tooltip);
-        });
 }
 
 fn snr_color(snr_db: f32) -> Color32 {
