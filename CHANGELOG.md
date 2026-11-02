@@ -6,6 +6,8 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-02
+
 ### Added
 - Volume control for the broadcast's audio (0–400%) and an optional automatic level that keeps
   the loudness about the same from broadcast to broadcast; both apply at once and are remembered.
@@ -171,7 +173,8 @@ First release.
 - Windows package with SoapySDR, the RTL-SDR and HackRF drivers and libiio, in two variants:
   with and without FFmpeg. `qoda --diagnose` reports what the program finds.
 
-[Unreleased]: https://github.com/sozden/QODA/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sozden/QODA/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/sozden/QODA/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sozden/QODA/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/sozden/QODA/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/sozden/QODA/compare/v0.1.2...v0.1.3
