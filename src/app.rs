@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::decoder::{self, AudioControl, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
 use crate::i18n::{Lang, Strings, fill};
 use crate::logo;
-use qoda::monitor::{MonitorConfig, SpectrumSender, SpectrumView};
+use qoda::monitor::{COMMAND_PORT, CommandListener, MonitorCommand, MonitorConfig, SpectrumSender, SpectrumView};
 use crate::sdr::{self, Command, DeviceInfo, DeviceKind, Event, Frame, SdrError, Settings};
 use crate::settings::UserSettings;
 use qoda::detect::{self, Detection};
@@ -108,6 +108,8 @@ pub struct QodaApp {
     monitor_telemetry_port: u16,
     /// Spectrum to the monitor output; exists while `monitor` is on.
     spectrum_out: Option<SpectrumSender>,
+    /// Commands from the external monitor; exists while `monitor` is on.
+    commands_in: Option<CommandListener>,
 
     detection: Option<Detection>,
     /// Live DVB-S2 decoder (while watching).
@@ -175,6 +177,7 @@ impl QodaApp {
             monitor_ts_port: user.monitor_ts_port,
             monitor_telemetry_port: user.monitor_telemetry_port,
             spectrum_out: None,
+            commands_in: None,
             detection: None,
             decoder: None,
             video_tex: None,
@@ -571,6 +574,44 @@ impl QodaApp {
         };
         if let Some(out) = &mut self.spectrum_out {
             out.maybe_send(&view);
+        }
+    }
+
+    /// Commands from the external monitor while the monitor output is on.
+    fn poll_commands(&mut self, ctx: &egui::Context) {
+        if !self.monitor {
+            self.commands_in = None;
+            return;
+        }
+        if self.commands_in.is_none() {
+            // The port may be taken by another program; then there are simply no commands.
+            self.commands_in = CommandListener::new(COMMAND_PORT).ok();
+        }
+        let Some(cmd) = self.commands_in.as_ref().and_then(|c| c.poll()) else { return };
+        match cmd {
+            MonitorCommand::Watch(mhz) => self.watch_from_monitor(ctx, mhz),
+        }
+    }
+
+    /// A tap on the external monitor's spectrum: the same as clicking the spectrum here, then
+    /// watching the signal found there (switching to it if another one is being watched).
+    fn watch_from_monitor(&mut self, ctx: &egui::Context, mhz: f64) {
+        if self.handle.is_none() {
+            return;
+        }
+        let (center, span) = self.frame_span();
+        if (mhz - center).abs() > span / 2.0 {
+            return;
+        }
+        self.selected_mhz = mhz;
+        self.auto_detect(mhz);
+        if self.detection.is_none() {
+            return; // auto_detect has already shown "no broadcast found"
+        }
+        if self.decoder.is_some() {
+            self.start_watch(ctx);
+        } else {
+            self.watch(ctx);
         }
     }
 
@@ -1361,6 +1402,7 @@ impl eframe::App for QodaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_events();
         let ctx = ui.ctx().clone();
+        self.poll_commands(&ctx);
         self.poll_video(&ctx);
         if let Some(t) = self.pending_restart {
             if t.elapsed() >= RESTART_DELAY {

@@ -22,6 +22,56 @@ const CONSTELLATION_SCALE: f32 = 90.0;
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_TS_PORT: u16 = 1234;
 pub const DEFAULT_TELEMETRY_PORT: u16 = 5555;
+/// Commands from the external monitor arrive here, on the loopback interface only.
+pub const COMMAND_PORT: u16 = 5556;
+
+/// A command from the external monitor (e.g. a tap on its spectrum).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MonitorCommand {
+    /// Select the signal nearest this RF frequency (MHz) and watch it.
+    Watch(f64),
+}
+
+/// Parses one command line: `watch <MHz>`. Anything else is ignored.
+pub fn parse_command(text: &str) -> Option<MonitorCommand> {
+    let mut words = text.split_whitespace();
+    match words.next()? {
+        "watch" => {
+            let mhz: f64 = words.next()?.parse().ok()?;
+            (mhz.is_finite() && mhz > 0.0).then_some(MonitorCommand::Watch(mhz))
+        }
+        _ => None,
+    }
+}
+
+/// Receives monitor commands. Bound to 127.0.0.1 so only programs on this computer (the
+/// DATV-Monitor sender) can steer the receiver, never the network.
+pub struct CommandListener {
+    socket: UdpSocket,
+}
+
+impl CommandListener {
+    pub fn new(port: u16) -> std::io::Result<Self> {
+        let socket = UdpSocket::bind(("127.0.0.1", port))?;
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket })
+    }
+
+    /// The newest waiting command, if any; older ones are dropped (only the last tap matters).
+    pub fn poll(&self) -> Option<MonitorCommand> {
+        let mut buf = [0u8; 256];
+        let mut newest = None;
+        while let Ok((n, from)) = self.socket.recv_from(&mut buf) {
+            if !from.ip().is_loopback() {
+                continue;
+            }
+            if let Some(c) = std::str::from_utf8(&buf[..n]).ok().and_then(parse_command) {
+                newest = Some(c);
+            }
+        }
+        newest
+    }
+}
 
 /// Where to send and what the receiver is tuned to (the decoder does not know the RF frequency).
 #[derive(Clone)]
@@ -222,6 +272,27 @@ mod tests {
         let s = ReceiverStats { constellation: vec![Complex::new(1.0, -0.5), Complex::new(3.0, 0.0)], ..Default::default() };
         let c = constellation_datagram(&s).unwrap();
         assert_eq!(c, vec![b'C', 90, (-45i8) as u8, 127, 0]);
+    }
+
+    #[test]
+    fn commands_parse() {
+        assert_eq!(parse_command("watch 10492.770\n"), Some(MonitorCommand::Watch(10492.770)));
+        assert_eq!(parse_command("watch"), None);
+        assert_eq!(parse_command("watch -1"), None);
+        assert_eq!(parse_command("watch nan"), None);
+        assert_eq!(parse_command("stop"), None);
+    }
+
+    #[test]
+    fn listener_takes_the_newest_command() {
+        let l = CommandListener::new(0).unwrap();
+        let port = l.socket.local_addr().unwrap().port();
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.send_to(b"watch 10491.5", ("127.0.0.1", port)).unwrap();
+        s.send_to(b"watch 10497.73", ("127.0.0.1", port)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(l.poll(), Some(MonitorCommand::Watch(10497.73)));
+        assert_eq!(l.poll(), None);
     }
 
     #[test]

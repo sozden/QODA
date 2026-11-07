@@ -14,6 +14,9 @@ All notable changes to QODA are listed here. The format follows
 - `qoda-analyze --monitor`: plays a recording in a loop at real time to the monitor output.
 - The monitor output also carries the spectrum (320 points, about eight times a second, with the
   scale and the selected signal) whenever the receiver runs, also while not watching.
+- Monitor commands: while the monitor output is on, QODA listens on 127.0.0.1:5556 (this computer
+  only) for `watch <MHz>`, which selects the signal there as a click on the spectrum does and
+  watches it. DATV-Monitor sends it when its spectrum is tapped.
 
 ## [0.2.1] - 2026-11-02
 
