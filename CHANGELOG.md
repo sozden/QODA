@@ -6,6 +6,13 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Monitor output (UDP): while watching, sends the decoded TS (7 packets per datagram, default
+  127.0.0.1:1234, playable with VLC) and the telemetry with constellation points (default port
+  5555) for an external monitor such as DATV-Monitor on an M5Stack Core2. Address and ports are
+  in the settings file (`monitor_host`, `monitor_ts_port`, `monitor_telemetry_port`).
+- `qoda-analyze --monitor`: plays a recording in a loop at real time to the monitor output.
+
 ## [0.2.1] - 2026-11-02
 
 ### Added

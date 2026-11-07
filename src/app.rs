@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::decoder::{self, AudioControl, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
 use crate::i18n::{Lang, Strings, fill};
 use crate::logo;
+use qoda::monitor::MonitorConfig;
 use crate::sdr::{self, Command, DeviceInfo, DeviceKind, Event, Frame, SdrError, Settings};
 use crate::settings::UserSettings;
 use qoda::detect::{self, Detection};
@@ -100,6 +101,11 @@ pub struct QodaApp {
     gain_db: f64,
     /// Also play audio while watching.
     audio: bool,
+    /// Send TS and telemetry over UDP while watching; the address comes from the settings file.
+    monitor: bool,
+    monitor_host: String,
+    monitor_ts_port: u16,
+    monitor_telemetry_port: u16,
 
     detection: Option<Detection>,
     /// Live DVB-S2 decoder (while watching).
@@ -162,6 +168,10 @@ impl QodaApp {
             auto_gain: false,
             gain_db: 30.0,
             audio: true,
+            monitor: user.monitor,
+            monitor_host: user.monitor_host.clone(),
+            monitor_ts_port: user.monitor_ts_port,
+            monitor_telemetry_port: user.monitor_telemetry_port,
             detection: None,
             decoder: None,
             video_tex: None,
@@ -197,6 +207,10 @@ impl QodaApp {
             volume: self.audio_control.volume(),
             auto_level: self.audio_control.auto_level(),
             network_devices: self.network_devices.clone(),
+            monitor: self.monitor,
+            monitor_host: self.monitor_host.clone(),
+            monitor_ts_port: self.monitor_ts_port,
+            monitor_telemetry_port: self.monitor_telemetry_port,
         }
         .save();
     }
@@ -406,8 +420,17 @@ impl QodaApp {
             symbol_rate: self.symbol_rate_ks as f64 * 1e3,
             rolloff: self.rolloff as f64,
         };
+        let monitor = self.monitor.then(|| MonitorConfig {
+            host: self.monitor_host.clone(),
+            ts_port: self.monitor_ts_port,
+            telemetry_port: self.monitor_telemetry_port,
+            frequency_mhz: self.selected_mhz,
+            symbol_rate_ks: self.symbol_rate_ks as f64,
+        });
         let ctx = ctx.clone();
-        let d = decoder::spawn(cfg, self.audio.then(|| Arc::clone(&self.audio_control)), move || ctx.request_repaint());
+        let d = decoder::spawn(cfg, self.audio.then(|| Arc::clone(&self.audio_control)), monitor, move || {
+            ctx.request_repaint()
+        });
         self.send(Command::IqTap(Some((d.iq.clone(), d.dropped.clone()))));
         self.decoder = Some(d);
         self.video_seq = 0;
@@ -913,6 +936,13 @@ impl QodaApp {
                 self.save_settings();
             }
         });
+        let tooltip = fill(t.monitor_tooltip, &[&self.monitor_host, &self.monitor_ts_port, &self.monitor_telemetry_port]);
+        if ui.checkbox(&mut self.monitor, t.monitor_output).on_hover_text(tooltip).changed() {
+            self.save_settings();
+            if self.decoder.is_some() {
+                self.start_watch(ui.ctx());
+            }
+        }
         let Some(d) = &self.decoder else {
             ui.label(RichText::new(t.not_watching).color(MUTED));
             return;

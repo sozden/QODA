@@ -7,6 +7,7 @@ pub mod dsp;
 pub mod dvbs2;
 pub mod ffmpeg;
 pub mod iio;
+pub mod monitor;
 pub mod sigmf;
 pub mod transmit;
 pub mod tsinfo;

@@ -93,6 +93,8 @@ pub struct ReceiverStats {
     pub ts_cc_errors: u64,
     /// Service name, provider and streams read from the DVB tables.
     pub service: ServiceInfo,
+    /// Phase-corrected data symbols of the last frame on the unit constellation, for display.
+    pub constellation: Vec<Complex<f32>>,
 }
 
 struct FecState {
@@ -452,6 +454,7 @@ impl Receiver {
             Some(map) => plframe::demap(body, scrambling, pls.pilot_blocks(), carrier, CARRIER_BANDWIDTH, map),
         };
         self.stats.snr_db = demapped.snr_db;
+        self.stats.constellation = demapped.constellation;
         // The PLL's frequency at the end of the body is much better than a single header's estimate.
         // It is used without waiting for the LDPC result; otherwise, while the first estimate is wrong,
         // the following headers are decoded with the same error.

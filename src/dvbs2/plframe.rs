@@ -59,6 +59,17 @@ pub struct Demapped {
     pub pilot_corr: Complex<f32>,
     /// Whether the phase came from the pilots (weak signal) rather than the loop; `final_freq` then means nothing.
     pub pilot_aided: bool,
+    /// Up to `CONSTELLATION_POINTS` phase-corrected data symbols spread over the body, scaled to
+    /// the unit constellation, for display.
+    pub constellation: Vec<Complex<f32>>,
+}
+
+/// Number of symbols kept per frame for the constellation display.
+pub const CONSTELLATION_POINTS: usize = 256;
+
+/// Keeps every n-th index so that about `CONSTELLATION_POINTS` symbols of a body are sampled.
+fn constellation_stride(body_len: usize) -> usize {
+    (body_len / CONSTELLATION_POINTS).max(1)
 }
 
 /// At the start of a frame the loop runs `ACQUIRE_FACTOR` times wider for this many
@@ -180,6 +191,8 @@ pub fn demap_qpsk(
     let mut freq = start.freq;
     let aided = weak_signal_phases(body, scrambling, pilot_blocks, &start, PILOT_AIDED_SNR_DB);
     let mut llr = Vec::with_capacity(body.len() * 2);
+    let stride = constellation_stride(body.len());
+    let mut constellation = Vec::with_capacity(CONSTELLATION_POINTS + 1);
     let (mut sig, mut err) = (0.0f64, 0.0f64);
     for (index, (z, &k)) in body.iter().zip(scrambling).enumerate() {
         if let Some(phases) = &aided {
@@ -187,6 +200,9 @@ pub fn demap_qpsk(
         }
         let r = descramble(*z, k) * Complex::from_polar(1.0, -phase);
         let pilot = is_pilot(index, pilot_blocks);
+        if !pilot && index % stride == 0 && constellation.len() < CONSTELLATION_POINTS {
+            constellation.push(r);
+        }
         // Pilots are the known (1 + j)/√2 symbol; for data, the nearest QPSK point.
         let decision = if pilot { Complex::new(s, s) } else { Complex::new(s.copysign(r.re), s.copysign(r.im)) };
         let e = (r * decision.conj()).im;
@@ -215,8 +231,16 @@ pub fn demap_qpsk(
     let snr_db = 10.0 * snr.log10();
     let scale = 2.0 * std::f32::consts::SQRT_2 * snr / amplitude;
     llr.iter_mut().for_each(|l| *l *= scale);
+    constellation.iter_mut().for_each(|c| *c /= amplitude);
     let pilot_aided = aided.is_some();
-    Demapped { llr, snr_db, final_freq: freq, pilot_corr: pilot_correlation(body, scrambling, pilot_blocks), pilot_aided }
+    Demapped {
+        llr,
+        snr_db,
+        final_freq: freq,
+        pilot_corr: pilot_correlation(body, scrambling, pilot_blocks),
+        pilot_aided,
+        constellation,
+    }
 }
 
 /// Signal and noise power of constant-modulus symbols (QPSK, 8PSK) from the second and fourth
@@ -260,6 +284,7 @@ pub fn demap(
     // Scale the symbols to the unit constellation: the AGC normalized signal plus noise, not the signal.
     let gain = moments.map_or(1.0, |(s, _)| 1.0 / s.sqrt());
     let mut data = Vec::with_capacity(body.len());
+    let stride = constellation_stride(body.len());
     let (mut sig, mut err) = (0.0f64, 0.0f64);
     for (index, (z, &k)) in body.iter().zip(scrambling).enumerate() {
         if let Some(phases) = &aided {
@@ -294,7 +319,15 @@ pub fn demap(
         }
     }
     let pilot_aided = aided.is_some();
-    Demapped { llr, snr_db, final_freq: freq, pilot_corr: pilot_correlation(body, scrambling, pilot_blocks), pilot_aided }
+    let constellation = data.iter().step_by(stride).take(CONSTELLATION_POINTS).copied().collect();
+    Demapped {
+        llr,
+        snr_db,
+        final_freq: freq,
+        pilot_corr: pilot_correlation(body, scrambling, pilot_blocks),
+        pilot_aided,
+        constellation,
+    }
 }
 
 /// Computes the phase at the first symbol of the body from the header's measured phase and frequency.

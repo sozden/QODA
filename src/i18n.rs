@@ -123,6 +123,9 @@ pub struct Strings {
 
     // Watching
     pub audio: &'static str,
+    pub monitor_output: &'static str,
+    /// {} = host, {} = TS port, {} = telemetry port
+    pub monitor_tooltip: &'static str,
     pub not_watching: &'static str,
     pub locked: &'static str,
     pub too_weak: &'static str,
@@ -244,6 +247,8 @@ pub static EN: Strings = Strings {
     near_edge: " · at the edge of the band, center it",
 
     audio: "Audio",
+    monitor_output: "Monitor output (UDP)",
+    monitor_tooltip: "Sends the decoded TS to {}:{} (VLC: udp://@:port) and the telemetry to port {}, for an external monitor such as DATV-Monitor on an M5Stack Core2",
     not_watching: "Not watching",
     locked: "Locked",
     too_weak: "Signal too weak",
@@ -357,6 +362,8 @@ pub static TR: Strings = Strings {
     near_edge: " · kenara taşıyor, ortalayın",
 
     audio: "Ses",
+    monitor_output: "Monitör çıkışı (UDP)",
+    monitor_tooltip: "Çözülen TS'yi {}:{} adresine (VLC: udp://@:port), telemetriyi {} portuna gönderir; M5Stack Core2'deki DATV-Monitor gibi harici bir ekran için",
     not_watching: "İzleme kapalı",
     locked: "Kilitli",
     too_weak: "Sinyal çok zayıf",

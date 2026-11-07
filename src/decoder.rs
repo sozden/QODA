@@ -16,6 +16,8 @@ use std::thread;
 use num_complex::Complex;
 use qoda::dvbs2::receiver::{Receiver as DvbReceiver, ReceiverConfig, ReceiverStats};
 
+use qoda::monitor::{Monitor, MonitorConfig};
+
 /// Maximum number of IQ blocks that may wait between the SDR and the decoder.
 const QUEUE_BLOCKS: usize = 64;
 /// Maximum number of TS chunks that may wait between the decoder and each player.
@@ -57,25 +59,33 @@ pub struct Decoder {
     pub video: Arc<Mutex<Option<VideoFrame>>>,
 }
 
-/// If `audio` is None no audio player is started. `notify` is called on every new frame.
-pub fn spawn(cfg: ReceiverConfig, audio: Option<Arc<AudioControl>>, notify: impl Fn() + Send + 'static) -> Decoder {
+/// If `audio` is None no audio player is started; if `monitor` is None nothing is sent over UDP.
+/// `notify` is called on every new frame.
+pub fn spawn(
+    cfg: ReceiverConfig,
+    audio: Option<Arc<AudioControl>>,
+    monitor: Option<MonitorConfig>,
+    notify: impl Fn() + Send + 'static,
+) -> Decoder {
     let (tx, rx) = sync_channel(QUEUE_BLOCKS);
     let status = Arc::new(Mutex::new(DecoderStatus::default()));
     let video = Arc::new(Mutex::new(None));
     let (s, v) = (Arc::clone(&status), Arc::clone(&video));
-    thread::spawn(move || run(cfg, audio, rx, s, v, notify));
+    thread::spawn(move || run(cfg, audio, monitor, rx, s, v, notify));
     Decoder { iq: tx, status, dropped: Arc::new(AtomicU64::new(0)), video }
 }
 
 fn run(
     cfg: ReceiverConfig,
     audio: Option<Arc<AudioControl>>,
+    monitor: Option<MonitorConfig>,
     rx: Receiver<Vec<Complex<f32>>>,
     status: Arc<Mutex<DecoderStatus>>,
     video: Arc<Mutex<Option<VideoFrame>>>,
     notify: impl Fn() + Send + 'static,
 ) {
     let mut receiver = DvbReceiver::new(cfg);
+    let mut monitor = monitor.and_then(|m| Monitor::new(m).ok());
     let mut sinks: Vec<SyncSender<Arc<Vec<u8>>>> = Vec::new();
     let mut children: Vec<Child> = Vec::new();
 
@@ -108,6 +118,12 @@ fn run(
                     ts_dropped += 1;
                 }
             }
+            if let Some(m) = &mut monitor {
+                m.send_ts(&ts);
+            }
+        }
+        if let Some(m) = &mut monitor {
+            m.maybe_send_telemetry(&receiver.stats);
         }
         let mut st = status.lock().unwrap();
         st.stats = receiver.stats.clone();

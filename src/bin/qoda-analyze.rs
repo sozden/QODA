@@ -38,11 +38,14 @@ struct Args {
     noise_db: Option<f64>,
     /// Print a fine spectrum over `--freq ± span` (Hz).
     psd: Option<f64>,
+    /// Play the recording in a loop at real time through the streaming receiver and send the TS
+    /// and telemetry to the monitor output (UDP, as the receiver's "Monitor output").
+    monitor: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, profile: false, rolloff: None, stream: false, noise_db: None, psd: None };
+    let mut args = Args { path: PathBuf::new(), seconds: None, symbol_rate: None, freq: None, scan: false, profile: false, rolloff: None, stream: false, noise_db: None, psd: None, monitor: false };
     let num = |v: Option<String>, flag: &str| -> Result<f64, String> {
         v.ok_or(format!("missing value for {flag}"))?.parse().map_err(|e| format!("{flag}: {e}"))
     };
@@ -57,12 +60,13 @@ fn parse_args() -> Result<Args, String> {
             "--profile" => args.profile = true,
             "--noise" => args.noise_db = Some(num(it.next(), &a)?),
             "--psd" => args.psd = Some(num(it.next(), &a)? * 1e3),
+            "--monitor" => args.monitor = true,
             _ if a.starts_with("--") => return Err(format!("unknown option: {a}")),
             _ => args.path = PathBuf::from(a),
         }
     }
     if args.path.as_os_str().is_empty() {
-        return Err("usage: qoda-analyze <recording> [--scan] [--freq MHz] [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB]".into());
+        return Err("usage: qoda-analyze <recording> [--scan] [--freq MHz] [--seconds S] [--rs kS/s] [--rolloff R] [--stream] [--noise dB] [--monitor]".into());
     }
     Ok(args)
 }
@@ -139,6 +143,10 @@ fn run() -> Result<(), String> {
         found.snr_db
     );
 
+    if args.monitor {
+        let rf_mhz = (rec.frequency + found.center_offset_hz) / 1e6;
+        return run_monitor(&x, fs, found.center_offset_hz, rs, rolloff, rf_mhz);
+    }
     if args.stream {
         return run_stream(&x, fs, found.center_offset_hz, rs, rolloff, &args.path.with_extension("stream.ts"));
     }
@@ -396,6 +404,46 @@ fn decode_frames(frames: &[(plheader::Pls, Vec<f32>)], ts_path: &std::path::Path
         );
     }
     Ok(())
+}
+
+/// Plays the recording in a loop at real time through the streaming receiver and sends the TS and
+/// telemetry to the default monitor output, to try an external monitor without an SDR. Runs until stopped.
+fn run_monitor(x: &[Complex<f32>], fs: f64, offset_hz: f64, rs: f64, rolloff: f64, rf_mhz: f64) -> Result<(), String> {
+    use qoda::dvbs2::receiver::{Receiver, ReceiverConfig};
+    use qoda::monitor::{DEFAULT_HOST, DEFAULT_TELEMETRY_PORT, DEFAULT_TS_PORT, Monitor, MonitorConfig};
+    const CHUNK: usize = 16_384;
+    let mut monitor = Monitor::new(MonitorConfig {
+        host: DEFAULT_HOST.into(),
+        ts_port: DEFAULT_TS_PORT,
+        telemetry_port: DEFAULT_TELEMETRY_PORT,
+        frequency_mhz: rf_mhz,
+        symbol_rate_ks: rs / 1e3,
+    })
+    .map_err(|e| format!("monitor output: {e}"))?;
+    println!(
+        "Monitor output: TS to {DEFAULT_HOST}:{DEFAULT_TS_PORT}, telemetry to port {DEFAULT_TELEMETRY_PORT}; \
+         {rf_mhz:.3} MHz, {:.0} kS/s, looping at real time (Ctrl+C stops)",
+        rs / 1e3
+    );
+    let mut rx = Receiver::new(ReceiverConfig { sample_rate: fs, offset_hz, symbol_rate: rs, rolloff });
+    let started = std::time::Instant::now();
+    let mut played = 0usize;
+    let mut ts = Vec::new();
+    loop {
+        for chunk in x.chunks(CHUNK) {
+            ts.clear();
+            rx.process(chunk, &mut ts);
+            monitor.send_ts(&ts);
+            monitor.maybe_send_telemetry(&rx.stats);
+            played += chunk.len();
+            let due = std::time::Duration::from_secs_f64(played as f64 / fs);
+            if let Some(wait) = due.checked_sub(started.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+        let s = &rx.stats;
+        println!("  loop: {} frames decoded, {} failed, SNR {:.1} dB", s.frames_ok, s.frames_failed, s.snr_db);
+    }
 }
 
 /// Feeds the recording to the streaming receiver in small chunks, as the live receiver does.
