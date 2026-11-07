@@ -111,6 +111,10 @@ qoda-analyze recordings/<name>
 
 `--scan` lists every broadcast in the recording; `--freq MHz` picks one that is not at the center. It prints the detected parameters, every frame header, the error-correction results and the service information, and writes the transport stream next to the recording as a `.ts` file. Options: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (decode with the same streaming receiver as the live view) and `--noise dB` (add white noise to test weak-signal reception).
 
+### External monitor
+
+**Monitor output (UDP)** in the **Watch** card sends the decoded transport stream to `127.0.0.1:1234` (VLC can play it at `udp://@:1234`) and the telemetry, constellation and spectrum to port 5555, and accepts `watch <MHz>` commands from this computer on port 5556. [DATV-Monitor](https://github.com/sozden/DATV-Monitor) uses it to show the picture, the spectrum and the signal quality on an M5Stack Core2, which can also switch QODA to another broadcast with a tap. The address and ports are in the settings file (`monitor_host`, `monitor_ts_port`, `monitor_telemetry_port`). `qoda-analyze <recording> --monitor` plays a recording in a loop to the same output.
+
 ## Transmitting (experimental)
 
 `qoda-tx` is a DVB-S2 modulator for licensed radio amateurs. It turns an MPEG-TS file, or a test broadcast it makes with FFmpeg, into DVB-S2 and either writes a SigMF recording or transmits it on the QO-100 wideband uplink with an ADALM-Pluto.
@@ -289,6 +293,10 @@ qoda-analyze recordings/<ad>
 ```
 
 `--scan` kayıttaki bütün yayınları listeler; `--freq MHz` ortada olmayan bir yayını seçer. Tespit edilen parametreleri, her çerçeve başlığını, hata düzeltme sonuçlarını ve servis bilgisini yazdırır, taşıma akışını kaydın yanına `.ts` dosyası olarak yazar. Seçenekler: `--seconds S`, `--rs kS/s`, `--rolloff R`, `--stream` (canlı görünümdekiyle aynı akış alıcısıyla çöz) ve `--noise dB` (zayıf sinyal alımını sınamak için beyaz gürültü ekle).
+
+#### Harici monitör
+
+**İzleme** kartındaki **Monitör çıkışı (UDP)**, çözülen taşıma akışını `127.0.0.1:1234` adresine (VLC ile `udp://@:1234`), telemetriyi, konstelasyonu ve spektrumu 5555 portuna gönderir; 5556 portunda da yalnızca bu bilgisayardan gelen `watch <MHz>` komutlarını kabul eder. [DATV-Monitor](https://github.com/sozden/DATV-Monitor) bunu kullanarak görüntüyü, spektrumu ve sinyal kalitesini bir M5Stack Core2'de gösterir; Core2'de spektruma dokunarak QODA'yı başka bir yayına geçirmek de mümkündür. Adres ve portlar ayar dosyasındadır (`monitor_host`, `monitor_ts_port`, `monitor_telemetry_port`). `qoda-analyze <kayıt> --monitor` bir kaydı döngüde aynı çıkışa oynatır.
 
 ### Yayın yapma (deneysel)
 

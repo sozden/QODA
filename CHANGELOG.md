@@ -6,6 +6,8 @@ All notable changes to QODA are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-07
+
 ### Added
 - Monitor output (UDP): while watching, sends the decoded TS (7 packets per datagram, default
   127.0.0.1:1234, playable with VLC) and the telemetry with constellation points (default port
@@ -17,6 +19,10 @@ All notable changes to QODA are listed here. The format follows
 - Monitor commands: while the monitor output is on, QODA listens on 127.0.0.1:5556 (this computer
   only) for `watch <MHz>`, which selects the signal there as a click on the spectrum does and
   watches it. DATV-Monitor sends it when its spectrum is tapped.
+- The receiver keeps up to 256 phase-corrected symbols of each frame for the constellation shown
+  by an external monitor.
+
+See [DATV-Monitor](https://github.com/sozden/DATV-Monitor) for a monitor on an M5Stack Core2.
 
 ## [0.2.1] - 2026-11-02
 
@@ -185,7 +191,8 @@ First release.
 - Windows package with SoapySDR, the RTL-SDR and HackRF drivers and libiio, in two variants:
   with and without FFmpeg. `qoda --diagnose` reports what the program finds.
 
-[Unreleased]: https://github.com/sozden/QODA/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/sozden/QODA/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/sozden/QODA/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sozden/QODA/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/sozden/QODA/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/sozden/QODA/compare/v0.1.3...v0.1.4
