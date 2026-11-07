@@ -12,6 +12,8 @@ All notable changes to QODA are listed here. The format follows
   5555) for an external monitor such as DATV-Monitor on an M5Stack Core2. Address and ports are
   in the settings file (`monitor_host`, `monitor_ts_port`, `monitor_telemetry_port`).
 - `qoda-analyze --monitor`: plays a recording in a loop at real time to the monitor output.
+- The monitor output also carries the spectrum (320 points, about eight times a second, with the
+  scale and the selected signal) whenever the receiver runs, also while not watching.
 
 ## [0.2.1] - 2026-11-02
 

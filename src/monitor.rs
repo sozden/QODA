@@ -5,6 +5,8 @@
 //! - TS: 7 packets (1316 bytes) per datagram to `host:ts_port`.
 //! - Telemetry: to `host:telemetry_port`, four times a second; a datagram is `T` followed by
 //!   `key=value` lines, or `C` followed by constellation points as int8 I,Q pairs (1.0 = 90).
+//! - Spectrum: to the same port, about eight times a second whenever the receiver runs (also
+//!   while not watching); see [`spectrum_datagram`] for the layout.
 
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
@@ -104,6 +106,75 @@ pub fn telemetry_datagram(s: &ReceiverStats, cfg: &MonitorConfig) -> Vec<u8> {
     text.into_bytes()
 }
 
+/// Number of spectrum points sent: the width of the M5Stack Core2 screen.
+pub const SPECTRUM_POINTS: usize = 320;
+const SPECTRUM_PERIOD: Duration = Duration::from_millis(125);
+
+/// What the receiver shows: spectrum, its scale and the selected signal.
+pub struct SpectrumView<'a> {
+    pub center_mhz: f64,
+    pub span_mhz: f64,
+    /// Power per FFT bin (dB), lowest frequency first.
+    pub db: &'a [f32],
+    /// Display range (dB): floor and top.
+    pub range: (f32, f32),
+    pub selected_mhz: f64,
+    pub selected_bandwidth_mhz: f64,
+    pub watching: bool,
+}
+
+/// `S`, then little-endian: centre MHz (f64), span MHz (f32), selected signal's offset from the
+/// centre MHz (f32), its bandwidth MHz (f32), floor and top dB (i16 each), flags (u8, bit 0 =
+/// watching), point count (u16), then one byte per point (0 = floor, 255 = top). Each point is the
+/// highest bin it covers, so narrow signals stay visible.
+pub fn spectrum_datagram(v: &SpectrumView) -> Vec<u8> {
+    let n = SPECTRUM_POINTS;
+    let (lo, hi) = v.range;
+    let scale = 255.0 / (hi - lo).max(1.0);
+    let mut out = Vec::with_capacity(28 + n);
+    out.push(b'S');
+    out.extend_from_slice(&v.center_mhz.to_le_bytes());
+    out.extend_from_slice(&(v.span_mhz as f32).to_le_bytes());
+    out.extend_from_slice(&((v.selected_mhz - v.center_mhz) as f32).to_le_bytes());
+    out.extend_from_slice(&(v.selected_bandwidth_mhz as f32).to_le_bytes());
+    out.extend_from_slice(&(lo.round() as i16).to_le_bytes());
+    out.extend_from_slice(&(hi.round() as i16).to_le_bytes());
+    out.push(u8::from(v.watching));
+    out.extend_from_slice(&(n as u16).to_le_bytes());
+    let bins = v.db.len();
+    for i in 0..n {
+        let a = i * bins / n;
+        let b = ((i + 1) * bins / n).max(a + 1).min(bins);
+        let peak = v.db[a.min(bins.saturating_sub(1))..b].iter().copied().fold(f32::MIN, f32::max);
+        out.push(((peak - lo) * scale).round().clamp(0.0, 255.0) as u8);
+    }
+    out
+}
+
+/// Sends the spectrum from the UI thread at `SPECTRUM_PERIOD`; errors are ignored like the rest
+/// of the monitor output.
+pub struct SpectrumSender {
+    socket: UdpSocket,
+    addr: String,
+    last: Option<Instant>,
+}
+
+impl SpectrumSender {
+    pub fn new(host: &str, port: u16) -> std::io::Result<Self> {
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket, addr: format!("{host}:{port}"), last: None })
+    }
+
+    pub fn maybe_send(&mut self, v: &SpectrumView) {
+        if v.db.is_empty() || self.last.is_some_and(|t| t.elapsed() < SPECTRUM_PERIOD) {
+            return;
+        }
+        self.last = Some(Instant::now());
+        let _ = self.socket.send_to(&spectrum_datagram(v), &self.addr);
+    }
+}
+
 pub fn constellation_datagram(s: &ReceiverStats) -> Option<Vec<u8>> {
     if s.constellation.is_empty() {
         return None;
@@ -151,6 +222,33 @@ mod tests {
         let s = ReceiverStats { constellation: vec![Complex::new(1.0, -0.5), Complex::new(3.0, 0.0)], ..Default::default() };
         let c = constellation_datagram(&s).unwrap();
         assert_eq!(c, vec![b'C', 90, (-45i8) as u8, 127, 0]);
+    }
+
+    #[test]
+    fn spectrum_keeps_peaks_and_scale() {
+        // 640 bins at the floor with one narrow peak at the top of the range.
+        let mut db = vec![-80.0f32; 640];
+        db[321] = -40.0;
+        let v = SpectrumView {
+            center_mhz: 10495.25,
+            span_mhz: 10.0,
+            db: &db,
+            range: (-80.0, -40.0),
+            selected_mhz: 10496.25,
+            selected_bandwidth_mhz: 0.4,
+            watching: true,
+        };
+        let d = spectrum_datagram(&v);
+        assert_eq!(d.len(), 28 + SPECTRUM_POINTS);
+        assert_eq!(d[0], b'S');
+        assert_eq!(f64::from_le_bytes(d[1..9].try_into().unwrap()), 10495.25);
+        assert_eq!(f32::from_le_bytes(d[13..17].try_into().unwrap()), 1.0);
+        assert_eq!(i16::from_le_bytes(d[21..23].try_into().unwrap()), -80);
+        assert_eq!(d[25], 1);
+        assert_eq!(u16::from_le_bytes(d[26..28].try_into().unwrap()), 320);
+        let points = &d[28..];
+        assert_eq!(points[160], 255, "the narrow peak survives the reduction");
+        assert_eq!(points.iter().filter(|&&p| p == 0).count(), SPECTRUM_POINTS - 1);
     }
 
     #[test]

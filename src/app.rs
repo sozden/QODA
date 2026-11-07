@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::decoder::{self, AudioControl, Decoder, PlayerIssue, VIDEO_HEIGHT, VIDEO_WIDTH};
 use crate::i18n::{Lang, Strings, fill};
 use crate::logo;
-use qoda::monitor::MonitorConfig;
+use qoda::monitor::{MonitorConfig, SpectrumSender, SpectrumView};
 use crate::sdr::{self, Command, DeviceInfo, DeviceKind, Event, Frame, SdrError, Settings};
 use crate::settings::UserSettings;
 use qoda::detect::{self, Detection};
@@ -106,6 +106,8 @@ pub struct QodaApp {
     monitor_host: String,
     monitor_ts_port: u16,
     monitor_telemetry_port: u16,
+    /// Spectrum to the monitor output; exists while `monitor` is on.
+    spectrum_out: Option<SpectrumSender>,
 
     detection: Option<Detection>,
     /// Live DVB-S2 decoder (while watching).
@@ -172,6 +174,7 @@ impl QodaApp {
             monitor_host: user.monitor_host.clone(),
             monitor_ts_port: user.monitor_ts_port,
             monitor_telemetry_port: user.monitor_telemetry_port,
+            spectrum_out: None,
             detection: None,
             decoder: None,
             video_tex: None,
@@ -527,6 +530,8 @@ impl QodaApp {
             self.range.1 += 0.1 * (top - self.range.1);
         }
 
+        self.send_spectrum(&frame);
+
         // Scroll the waterfall down one row and write the new row at the top.
         let w = self.waterfall.size[0];
         self.waterfall.pixels.copy_within(0..w * (WATERFALL_ROWS - 1), w);
@@ -543,6 +548,29 @@ impl QodaApp {
         if self.frames_since_scan >= SCAN_EVERY_FRAMES {
             self.frames_since_scan = 0;
             self.signals = self.scan_signals();
+        }
+    }
+
+    /// Spectrum to the monitor output while it is on, also when not watching (to find signals).
+    fn send_spectrum(&mut self, frame: &Frame) {
+        if !self.monitor {
+            self.spectrum_out = None;
+            return;
+        }
+        if self.spectrum_out.is_none() {
+            self.spectrum_out = SpectrumSender::new(&self.monitor_host, self.monitor_telemetry_port).ok();
+        }
+        let view = SpectrumView {
+            center_mhz: frame.if_hz / 1e6 + self.lo_mhz,
+            span_mhz: frame.sample_rate / 1e6,
+            db: &self.smoothed,
+            range: self.range,
+            selected_mhz: self.selected_mhz,
+            selected_bandwidth_mhz: self.occupied_khz() as f64 / 1000.0,
+            watching: self.decoder.is_some(),
+        };
+        if let Some(out) = &mut self.spectrum_out {
+            out.maybe_send(&view);
         }
     }
 
